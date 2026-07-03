@@ -52,22 +52,59 @@ docker compose logs -f gateway orchestrator sql-worker report-worker db-access
 
 ## Architecture
 
+This view shows the service path and the access model together. Keycloak issues
+realm roles, the gateway checks agent invocation roles, and the orchestrator
+checks source permissions before it emits tool work to Kafka.
+
 ```mermaid
 flowchart TD
     frontend["Browser Test Console"]
-    keycloak["Keycloak OIDC"]
-    gateway["Gateway API<br/>JWT validation<br/>Agent access<br/>Source permission mapping"]
-    orchestrator["Orchestrator API<br/>LangGraph workflows<br/>LiteLLM planning<br/>Human approval state"]
-    kafka["Kafka<br/>agent.requested<br/>tool.requested<br/>tool.completed<br/>audit.events"]
-    workers["Workers<br/>SQL worker<br/>Report worker"]
-    db_access["DB Access API<br/>SQL validation<br/>Per-source allowlist<br/>Tenant context"]
-    worlddb["Postgres World DB<br/>city<br/>country<br/>country_language<br/>country_flag"]
-    procurementdb["Procurement DB<br/>suppliers<br/>purchase_orders<br/>supplier_summary"]
+
+    subgraph identity["Identity and roles"]
+        keycloak["Keycloak OIDC"]
+        agent_roles["Agent roles<br/>agent:world-agent:invoke<br/>agent:procurement-agent:invoke"]
+        permission_roles["Source permission roles<br/>permission:world-db:read<br/>permission:procurement-db:read"]
+    end
+
+    subgraph edge["Gateway access checks"]
+        gateway["Gateway API<br/>JWT validation<br/>agent:{agent_id}:invoke check"]
+        allowed_permissions["Trusted header<br/>x-allowed-permissions<br/>world-db, procurement-db"]
+    end
+
+    subgraph agents["Orchestrator agents"]
+        orchestrator["Orchestrator API<br/>LangGraph workflows<br/>LiteLLM planning<br/>Human approval state"]
+        world_agent["world-agent<br/>tools: sql, report, approval<br/>requires: world-db"]
+        procurement_agent["procurement-agent<br/>tools: sql, approval<br/>requires: procurement-db"]
+        denied["Denied run<br/>tool_access_denied audit event"]
+    end
+
+    subgraph tools["Tool execution"]
+        kafka["Kafka<br/>agent.requested<br/>tool.requested<br/>tool.completed<br/>audit.events"]
+        workers["Workers<br/>SQL worker<br/>Report worker"]
+        db_access["DB Access API<br/>SQL validation<br/>Per-source allowlist<br/>Tenant context"]
+    end
+
+    subgraph sources["Database sources"]
+        worlddb["Postgres World DB<br/>city<br/>country<br/>country_language<br/>country_flag"]
+        procurementdb["Procurement DB<br/>suppliers<br/>purchase_orders<br/>supplier_summary"]
+    end
 
     frontend -->|"Login"| keycloak
     keycloak -->|"Access token"| frontend
+    keycloak --> agent_roles
+    keycloak --> permission_roles
     frontend -->|"Bearer token"| gateway
-    gateway -->|"Trusted headers"| orchestrator
+    agent_roles -->|"authorizes selected agent"| gateway
+    permission_roles -->|"mapped by gateway"| allowed_permissions
+    gateway --> allowed_permissions
+    gateway -->|"Trusted context"| orchestrator
+    allowed_permissions -->|"source permissions"| orchestrator
+    orchestrator --> world_agent
+    orchestrator --> procurement_agent
+    world_agent -->|"allowed: world-db"| kafka
+    procurement_agent -->|"allowed: procurement-db"| kafka
+    world_agent -->|"missing permission"| denied
+    procurement_agent -->|"missing permission"| denied
     orchestrator -->|"Tool request events"| kafka
     kafka -->|"Consume"| workers
     workers -->|"Authorized query"| db_access
@@ -78,6 +115,14 @@ flowchart TD
     frontend -->|"Poll /runs/{run_id}"| gateway
     gateway -->|"Run status"| orchestrator
 ```
+
+| Layer | What it decides | Current examples |
+| --- | --- | --- |
+| Keycloak roles | Which agent and source claims appear in the JWT | `agent:world-agent:invoke`, `agent:procurement-agent:invoke`, `permission:world-db:read`, `permission:procurement-db:read` |
+| Gateway | Whether the user can invoke the requested agent | `world-agent` requires `agent:world-agent:invoke`; `procurement-agent` requires `agent:procurement-agent:invoke` |
+| Gateway to orchestrator | Which data sources the run may use | `x-allowed-permissions: world-db,procurement-db` |
+| Orchestrator agent | Which workflow and tool path runs | `world-agent` can use SQL, report, or approval; `procurement-agent` can use SQL or approval |
+| Source permission check | Whether a tool request is emitted or denied | World data needs `world-db`; procurement data needs `procurement-db`; missing access emits `tool_access_denied` |
 
 ## Local Services
 
