@@ -1,0 +1,195 @@
+{
+  "realm": "ptvn",
+  "displayName": "PTVN Agent Gateway",
+  "enabled": true,
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": true,
+  "roles": {
+    "realm": [
+      {
+        "name": "agent:world-agent:invoke",
+        "description": "Can invoke the World DB agent"
+      },
+      {
+        "name": "agent:procurement-agent:invoke",
+        "description": "Can invoke the procurement agent"
+      },
+      {
+        "name": "permission:world-db:read",
+        "description": "Can read the World DB source"
+      },
+      {
+        "name": "permission:procurement-db:read",
+        "description": "Can read the procurement database source"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "agent-frontend",
+      "name": "AI Agent Gateway Frontend",
+      "description": "Public browser client for the local AI Agent Gateway sample",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8000/*",
+        "http://localhost:3000/*",
+        "http://127.0.0.1:8000/*",
+        "http://127.0.0.1:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8000",
+        "http://localhost:3000",
+        "http://127.0.0.1:8000",
+        "http://127.0.0.1:3000"
+      ],
+      "defaultClientScopes": [
+        "profile",
+        "email",
+        "roles"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "agent-gateway-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "agent-gateway",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "tenant-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tenant_id",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "world-analyst",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "World",
+      "lastName": "Analyst",
+      "email": "world-analyst@example.com",
+      "attributes": {
+        "tenant_id": [
+          "demo-tenant"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "world-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent:world-agent:invoke",
+        "permission:world-db:read"
+      ]
+    },
+    {
+      "username": "procurement-analyst",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Procurement",
+      "lastName": "Analyst",
+      "email": "procurement-analyst@example.com",
+      "attributes": {
+        "tenant_id": [
+          "demo-tenant"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "procurement-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent:procurement-agent:invoke",
+        "permission:procurement-db:read"
+      ]
+    },
+    {
+      "username": "source-auditor",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Source",
+      "lastName": "Auditor",
+      "email": "source-auditor@example.com",
+      "attributes": {
+        "tenant_id": [
+          "demo-tenant"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "auditor-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent:world-agent:invoke",
+        "agent:procurement-agent:invoke",
+        "permission:world-db:read"
+      ]
+    },
+    {
+      "username": "data-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Data",
+      "lastName": "Admin",
+      "email": "data-admin@example.com",
+      "attributes": {
+        "tenant_id": [
+          "demo-tenant"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "data-admin-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "agent:world-agent:invoke",
+        "agent:procurement-agent:invoke",
+        "permission:world-db:read",
+        "permission:procurement-db:read"
+      ]
+    }
+  ]
+}

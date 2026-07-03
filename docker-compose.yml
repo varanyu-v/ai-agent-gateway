@@ -1,0 +1,200 @@
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ai-agent-gateway:local
+  networks:
+    - backend
+  restart: unless-stopped
+
+x-app-env: &app-env
+  KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8080/realms/ptvn}
+  KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-agent-gateway}
+  KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-agent-frontend}
+  KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/ptvn/protocol/openid-connect/certs}
+  ORCH_URL: http://orchestrator:8001
+  DB_PROXY_URL: http://db-access:8003
+  KAFKA_BOOTSTRAP: kafka:9092
+  LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
+  LITELLM_MODEL: ${LITELLM_MODEL:-}
+  LITELLM_API_KEY: ${LITELLM_API_KEY:-}
+  LITELLM_TIMEOUT_SECONDS: ${LITELLM_TIMEOUT_SECONDS:-30}
+  DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
+  WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
+  PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    command:
+      - start-dev
+      - --import-realm
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_STRICT: "false"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./docker/keycloak:/opt/keycloak/data/import:ro
+
+  gateway:
+    <<: *app
+    command: uvicorn apps.gateway.main:app --host 0.0.0.0 --port 8000
+    environment:
+      <<: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      keycloak:
+        condition: service_started
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  orchestrator:
+    <<: *app
+    command: uvicorn apps.orchestrator.main:app --host 0.0.0.0 --port 8001
+    environment:
+      <<: *app-env
+    ports:
+      - "8001:8001"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/docs', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  db-access:
+    <<: *app
+    command: uvicorn apps.db_access.main:app --host 0.0.0.0 --port 8003
+    environment:
+      <<: *app-env
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      procurement-db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/docs', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  sql-worker:
+    <<: *app
+    command: python -m apps.workers.sql_worker
+    environment:
+      <<: *app-env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      db-access:
+        condition: service_healthy
+
+  report-worker:
+    <<: *app
+    command: python -m apps.workers.report_worker
+    environment:
+      <<: *app-env
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    restart: unless-stopped
+    networks:
+      - backend
+    ports:
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - kafka-topics --bootstrap-server localhost:9092 --list >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  postgres:
+    image: ghusta/postgres-world-db:2.15.0
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      POSTGRES_PASSWORD: world123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-world-pg18-data:/var/lib/postgresql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U world -d world-db
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  procurement-db-init:
+    image: ghusta/postgres-world-db:2.15.0
+    restart: "no"
+    networks:
+      - backend
+    environment:
+      PGPASSWORD: world123
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - sh
+      - -c
+      - psql -h postgres -U world -d world-db -v ON_ERROR_STOP=1 -f /docker-entrypoint-initdb.d/02-create-procurement-database.sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-world-pg18-data:
+
+networks:
+  backend:
+    driver: bridge

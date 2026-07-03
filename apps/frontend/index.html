@@ -1,0 +1,1543 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Agent Gateway Test Console</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f5f7fb;
+        --surface: #ffffff;
+        --surface-strong: #eef3f9;
+        --ink: #17202f;
+        --muted: #607089;
+        --line: #d8e0ea;
+        --primary: #1466cc;
+        --primary-dark: #0b4f9f;
+        --ok: #14784f;
+        --warn: #a35a00;
+        --bad: #b42318;
+        --code: #101828;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        letter-spacing: 0;
+      }
+
+      button,
+      input,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        border: 0;
+        cursor: pointer;
+      }
+
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 18px 28px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .brand-mark {
+        display: grid;
+        width: 38px;
+        height: 38px;
+        place-items: center;
+        border-radius: 8px;
+        background: #102a43;
+        color: #fff;
+        font-weight: 800;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+      }
+
+      .subtitle {
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .status-row {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 5px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .pill.ok {
+        border-color: #acd8c7;
+        background: #e8f7f1;
+        color: var(--ok);
+      }
+
+      .pill.warn {
+        border-color: #f0ce9b;
+        background: #fff4df;
+        color: var(--warn);
+      }
+
+      main {
+        width: min(1440px, 100%);
+        margin: 0 auto;
+        padding: 22px 28px 32px;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(120px, 1fr));
+        gap: 8px;
+        margin-bottom: 18px;
+      }
+
+      .flow-step {
+        min-height: 76px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .flow-step strong {
+        display: block;
+        font-size: 13px;
+      }
+
+      .flow-step span {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        gap: 18px;
+        align-items: start;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel-title {
+        margin: 0;
+        font-size: 15px;
+        line-height: 1.25;
+      }
+
+      .panel-note {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .panel-body {
+        padding: 16px 18px 18px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .tutorial {
+        margin: 0;
+        padding-left: 20px;
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .tutorial code,
+      .inline-code {
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--surface-strong);
+        padding: 1px 5px;
+        color: var(--code);
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--ink);
+        outline: none;
+      }
+
+      input,
+      select {
+        min-height: 40px;
+        padding: 8px 10px;
+      }
+
+      textarea {
+        min-height: 112px;
+        resize: vertical;
+        padding: 10px;
+        line-height: 1.45;
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px rgba(20, 102, 204, 0.15);
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 9px 14px;
+        border-radius: 7px;
+        background: var(--primary);
+        color: #fff;
+        font-weight: 700;
+      }
+
+      .btn:hover {
+        background: var(--primary-dark);
+      }
+
+      .btn.secondary {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      .btn.secondary:hover {
+        background: var(--surface-strong);
+      }
+
+      .btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .sample-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .sample-btn {
+        display: grid;
+        gap: 6px;
+        min-height: 126px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--surface);
+        color: var(--ink);
+        text-align: left;
+        font-size: 13px;
+      }
+
+      .sample-btn:hover {
+        border-color: var(--primary);
+        background: #edf5ff;
+      }
+
+      .sample-title {
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.3;
+      }
+
+      .sample-desc {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .sample-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-self: end;
+      }
+
+      .sample-chip {
+        max-width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        padding: 3px 7px;
+        font-size: 11px;
+        font-weight: 700;
+        overflow-wrap: anywhere;
+      }
+
+      .role-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      .role-table th,
+      .role-table td {
+        padding: 8px 6px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .role-table th {
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+
+      .access-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .access-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .access-item {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        min-height: 58px;
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .access-item.allowed {
+        border-color: #acd8c7;
+        background: #f3fbf7;
+      }
+
+      .access-item.blocked {
+        background: #f8fafc;
+        color: var(--muted);
+      }
+
+      .access-name {
+        display: block;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+        line-height: 1.35;
+      }
+
+      .access-role {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        overflow-wrap: anywhere;
+      }
+
+      .access-state {
+        flex: 0 0 auto;
+        border-radius: 999px;
+        padding: 4px 8px;
+        background: var(--surface-strong);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .access-state.allowed {
+        background: #dff4ea;
+        color: var(--ok);
+      }
+
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .tab {
+        min-height: 34px;
+        padding: 7px 11px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--surface);
+        color: var(--muted);
+        font-weight: 700;
+      }
+
+      .tab.active {
+        border-color: var(--primary);
+        background: #eaf3ff;
+        color: var(--primary);
+      }
+
+      .result {
+        min-height: 220px;
+        overflow: auto;
+        border-radius: 8px;
+        background: var(--code);
+        color: #e6edf3;
+        padding: 14px;
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .claims {
+        min-height: 120px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface-strong);
+        padding: 12px;
+        color: var(--code);
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .sql-output {
+        margin-bottom: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+
+      .sql-output-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--line);
+        background: var(--surface-strong);
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .sql-output-body {
+        padding: 12px;
+        overflow: auto;
+      }
+
+      .sql-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      .sql-table th,
+      .sql-table td {
+        padding: 8px 9px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .sql-table th {
+        background: #f8fafc;
+        color: var(--muted);
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+
+      .sql-empty {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .agent-io {
+        display: grid;
+        gap: 12px;
+        margin-bottom: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        padding: 12px;
+      }
+
+      .agent-io-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .io-block {
+        min-width: 0;
+      }
+
+      .io-text {
+        min-height: 72px;
+        margin: 0;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface-strong);
+        color: var(--code);
+        padding: 10px;
+        font-family:
+          "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+
+      .approval-action {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .message {
+        border-left: 4px solid var(--primary);
+        background: #edf5ff;
+        padding: 10px 12px;
+        border-radius: 6px;
+        color: var(--ink);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .message.error {
+        border-left-color: var(--bad);
+        background: #fff1f0;
+      }
+
+      .message.ok {
+        border-left-color: var(--ok);
+        background: #e8f7f1;
+      }
+
+      @media (max-width: 980px) {
+        .topbar {
+          align-items: flex-start;
+          flex-direction: column;
+          padding: 16px;
+        }
+
+        main {
+          padding: 16px;
+        }
+
+        .flow {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .flow,
+        .form-grid,
+        .sample-grid,
+        .access-grid,
+        .agent-io-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .panel-header {
+          display: block;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">AI</div>
+        <div>
+          <h1>AI Agent Gateway Test Console</h1>
+          <div class="subtitle">
+            Login, run an agent, and watch the gateway to orchestrator to worker path.
+          </div>
+        </div>
+      </div>
+      <div class="status-row">
+        <span class="pill" id="configStatus">Config loading</span>
+        <span class="pill" id="tokenStatus">Not logged in</span>
+        <span class="pill" id="activeUser">No user</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="flow" aria-label="System flow">
+        <div class="flow-step">
+          <strong>1. Keycloak</strong>
+          <span>Get a token for one of the seeded demo users.</span>
+        </div>
+        <div class="flow-step">
+          <strong>2. Gateway</strong>
+          <span>Validate JWT, tenant, audience, and roles.</span>
+        </div>
+        <div class="flow-step">
+          <strong>3. Orchestrator</strong>
+          <span>Choose a workflow and publish tool requests.</span>
+        </div>
+        <div class="flow-step">
+          <strong>4. Kafka</strong>
+          <span>Carry requested and completed tool events.</span>
+        </div>
+        <div class="flow-step">
+          <strong>5. Workers</strong>
+          <span>Run SQL or report work against the sample services.</span>
+        </div>
+      </section>
+
+      <div class="grid">
+        <aside class="stack">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Tutorial</h2>
+                <p class="panel-note">Use these steps after the Compose stack is running.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <ol class="tutorial">
+                <li>Start the stack with <code>docker compose up --build</code>.</li>
+                <li>Select a seeded user and press <span class="inline-code">Login</span>.</li>
+                <li>Pick an agent and sample message.</li>
+                <li>Press <span class="inline-code">Run agent</span> and inspect the JSON response.</li>
+                <li>Watch worker activity with <code>docker compose logs -f orchestrator sql-worker report-worker db-access</code>.</li>
+              </ol>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Seeded Users</h2>
+                <p class="panel-note">Each user proves a different role path.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <table class="role-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Best test</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>world-analyst</td>
+                    <td>World DB SQL and report succeed; procurement access is blocked.</td>
+                  </tr>
+                  <tr>
+                    <td>procurement-analyst</td>
+                    <td>Procurement DB SQL succeeds; World DB is denied.</td>
+                  </tr>
+                  <tr>
+                    <td>source-auditor</td>
+                    <td>Both agents are callable, but only World DB is readable.</td>
+                  </tr>
+                  <tr>
+                    <td>data-admin</td>
+                    <td>Both agents and both database permissions are allowed.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </aside>
+
+        <section class="stack">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Login</h2>
+                <p class="panel-note">The password grant is enabled only for this local test client.</p>
+              </div>
+              <button class="btn secondary" id="clearBtn" type="button">Clear</button>
+            </div>
+            <div class="panel-body stack">
+              <div class="form-grid">
+                <div>
+                  <label for="userPreset">Preset user</label>
+                  <select id="userPreset"></select>
+                </div>
+                <div>
+                  <label for="username">Username</label>
+                  <input id="username" autocomplete="username" />
+                </div>
+                <div>
+                  <label for="password">Password</label>
+                  <input id="password" type="password" autocomplete="current-password" />
+                </div>
+                <div>
+                  <label for="agentId">Agent</label>
+                  <select id="agentId">
+                    <option value="world-agent">world-agent</option>
+                    <option value="procurement-agent">procurement-agent</option>
+                  </select>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="btn" id="loginBtn" type="button">Login</button>
+                <button class="btn secondary" id="copyTokenBtn" type="button" disabled>Copy token</button>
+              </div>
+              <div class="message" id="loginMessage">
+                Load the page from <span class="inline-code">http://localhost:8000</span> after the stack starts.
+              </div>
+            </div>
+          </section>
+
+          <section class="panel" id="accessPanel" hidden>
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Agents & Permissions</h2>
+                <p class="panel-note">Shown after login from the roles inside the current token.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="access-grid">
+                <div>
+                  <label>Agents</label>
+                  <div class="access-list" id="agentAccessList"></div>
+                </div>
+                <div>
+                  <label>Permissions</label>
+                  <div class="access-list" id="toolAccessList"></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Run Agent</h2>
+                <p class="panel-note">These messages exercise success, denial, and approval branches.</p>
+              </div>
+            </div>
+            <div class="panel-body stack">
+              <div>
+                <label>Sample messages</label>
+                <div class="sample-grid" id="sampleGrid"></div>
+              </div>
+              <div>
+                <label for="message">Message</label>
+                <textarea id="message"></textarea>
+              </div>
+              <div class="actions">
+                <button class="btn" id="runBtn" type="button" disabled>Run agent</button>
+                <button class="btn secondary" id="resetMessageBtn" type="button">Reset message</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">Result</h2>
+                <p class="panel-note">Use the response and logs together to verify the full async path.</p>
+              </div>
+            </div>
+            <div class="panel-body">
+              <div class="tabs">
+                <button class="tab active" data-tab="response" type="button">Response</button>
+                <button class="tab" data-tab="claims" type="button">Token claims</button>
+              </div>
+              <div class="agent-io" id="agentIo" hidden>
+                <div class="agent-io-grid">
+                  <div class="io-block">
+                    <label>Agent input</label>
+                    <pre class="io-text" id="agentInputOutput"></pre>
+                  </div>
+                  <div class="io-block">
+                    <label>Agent output</label>
+                    <pre class="io-text" id="agentOutput"></pre>
+                  </div>
+                </div>
+                <div class="approval-action" id="approvalAction" hidden>
+                  <button class="btn" id="approveBtn" type="button">Approve request</button>
+                </div>
+              </div>
+              <div class="sql-output" id="sqlOutput" hidden>
+                <div class="sql-output-header">
+                  <span>SQL response</span>
+                  <span class="pill" id="sqlStatus">Waiting</span>
+                </div>
+                <div class="sql-output-body" id="sqlOutputBody"></div>
+              </div>
+              <pre class="result" id="responseOutput"></pre>
+              <pre class="claims" id="claimsOutput" hidden></pre>
+            </div>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      const users = [
+        {
+          label: "World analyst",
+          username: "world-analyst",
+          password: "world-password",
+          agent: "world-agent",
+          message: "show the largest cities by population with country context",
+        },
+        {
+          label: "Procurement analyst",
+          username: "procurement-analyst",
+          password: "procurement-password",
+          agent: "procurement-agent",
+          message: "rank suppliers by total purchase spend and risk",
+        },
+        {
+          label: "Source auditor",
+          username: "source-auditor",
+          password: "auditor-password",
+          agent: "procurement-agent",
+          message: "rank suppliers by total purchase spend and risk",
+        },
+        {
+          label: "Data admin",
+          username: "data-admin",
+          password: "data-admin-password",
+          agent: "procurement-agent",
+          message: "remove blocked supplier records from the procurement source",
+        },
+      ];
+
+      const samples = [
+        {
+          title: "World Market Hotspots",
+          agent: "world-agent",
+          user: "world-analyst",
+          message: "show the largest cities by population with country context",
+          description:
+            "Queries the World DB source and returns city, country, continent, district, and population rows.",
+          expected: "World DB rows",
+        },
+        {
+          title: "Market Entry Report",
+          agent: "world-agent",
+          user: "world-analyst",
+          message: "generate a world market entry report",
+          description:
+            "Exercises the report worker through the World DB permission path without granting procurement access.",
+          expected: "Report ready",
+        },
+        {
+          title: "Procurement Spend Radar",
+          agent: "procurement-agent",
+          user: "procurement-analyst",
+          message: "rank suppliers by total purchase spend and risk",
+          description:
+            "Queries the second procurement database and ranks suppliers by spend, order count, and risk level.",
+          expected: "Supplier spend rows",
+        },
+        {
+          title: "Source Permission Denial",
+          agent: "procurement-agent",
+          user: "source-auditor",
+          message: "rank suppliers by total purchase spend and risk",
+          description:
+            "Proves agent access and database permission are separate by calling procurement without procurement-db read.",
+          expected: "Permission denied",
+        },
+        {
+          title: "Human Approval Gate",
+          agent: "procurement-agent",
+          user: "data-admin",
+          message: "remove blocked supplier records from the procurement source",
+          description:
+            "Triggers the approval branch for a destructive procurement-data request and reveals the approval button.",
+          expected: "Needs approval",
+        },
+      ];
+
+      const state = {
+        config: null,
+        token: "",
+        claims: null,
+        pollTimer: null,
+        currentInput: "",
+        currentRunId: "",
+        initialResponse: null,
+        latestRun: null,
+      };
+
+      const els = {
+        configStatus: document.querySelector("#configStatus"),
+        tokenStatus: document.querySelector("#tokenStatus"),
+        activeUser: document.querySelector("#activeUser"),
+        userPreset: document.querySelector("#userPreset"),
+        username: document.querySelector("#username"),
+        password: document.querySelector("#password"),
+        agentId: document.querySelector("#agentId"),
+        loginBtn: document.querySelector("#loginBtn"),
+        copyTokenBtn: document.querySelector("#copyTokenBtn"),
+        clearBtn: document.querySelector("#clearBtn"),
+        loginMessage: document.querySelector("#loginMessage"),
+        accessPanel: document.querySelector("#accessPanel"),
+        agentAccessList: document.querySelector("#agentAccessList"),
+        toolAccessList: document.querySelector("#toolAccessList"),
+        sampleGrid: document.querySelector("#sampleGrid"),
+        message: document.querySelector("#message"),
+        runBtn: document.querySelector("#runBtn"),
+        resetMessageBtn: document.querySelector("#resetMessageBtn"),
+        agentIo: document.querySelector("#agentIo"),
+        agentInputOutput: document.querySelector("#agentInputOutput"),
+        agentOutput: document.querySelector("#agentOutput"),
+        approvalAction: document.querySelector("#approvalAction"),
+        approveBtn: document.querySelector("#approveBtn"),
+        sqlOutput: document.querySelector("#sqlOutput"),
+        sqlStatus: document.querySelector("#sqlStatus"),
+        sqlOutputBody: document.querySelector("#sqlOutputBody"),
+        responseOutput: document.querySelector("#responseOutput"),
+        claimsOutput: document.querySelector("#claimsOutput"),
+      };
+
+      function pretty(value) {
+        return JSON.stringify(value, null, 2);
+      }
+
+      function setMessage(text, type = "") {
+        els.loginMessage.className = `message ${type}`.trim();
+        els.loginMessage.textContent = text;
+      }
+
+      function decodeJwt(token) {
+        const payload = token.split(".")[1];
+        const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+        const json = decodeURIComponent(
+          atob(normalized)
+            .split("")
+            .map((char) => `%${(`00${char.charCodeAt(0).toString(16)}`).slice(-2)}`)
+            .join("")
+        );
+        return JSON.parse(json);
+      }
+
+      function renderClaims() {
+        if (!state.claims) {
+          els.claimsOutput.textContent = "Login to inspect token claims.";
+          return;
+        }
+
+        const view = {
+          preferred_username: state.claims.preferred_username,
+          sub: state.claims.sub,
+          iss: state.claims.iss,
+          aud: state.claims.aud,
+          tenant_id: state.claims.tenant_id,
+          roles: state.claims.realm_access?.roles || [],
+        };
+        els.claimsOutput.textContent = pretty(view);
+      }
+
+      function accessItem(item, allowed) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `access-item ${allowed ? "allowed" : "blocked"}`;
+
+        const text = document.createElement("div");
+        const name = document.createElement("span");
+        name.className = "access-name";
+        name.textContent = item.id;
+        const role = document.createElement("span");
+        role.className = "access-role";
+        role.textContent = item.role;
+        text.append(name, role);
+
+        const status = document.createElement("span");
+        status.className = `access-state ${allowed ? "allowed" : ""}`;
+        status.textContent = allowed ? "Allowed" : "Blocked";
+        wrapper.append(text, status);
+        return wrapper;
+      }
+
+      function renderAccess() {
+        els.agentAccessList.replaceChildren();
+        els.toolAccessList.replaceChildren();
+
+        if (!state.claims || !state.config) {
+          els.accessPanel.hidden = true;
+          return;
+        }
+
+        const roles = new Set(state.claims.realm_access?.roles || []);
+        (state.config.agents || []).forEach((agent) => {
+          const allowed = roles.has(agent.role);
+          els.agentAccessList.append(accessItem(agent, allowed));
+        });
+
+        (state.config.tools || []).forEach((tool) => {
+          const allowed = roles.has(tool.role);
+          els.toolAccessList.append(accessItem(tool, allowed));
+        });
+
+        els.accessPanel.hidden = false;
+      }
+
+      function clearAgentIo() {
+        els.agentIo.hidden = true;
+        els.agentInputOutput.textContent = "";
+        els.agentOutput.textContent = "";
+        els.approvalAction.hidden = true;
+        els.approveBtn.disabled = false;
+      }
+
+      function outputTextForRun(run) {
+        if (run.output) {
+          return run.output;
+        }
+        if (run.status === "denied") {
+          return run.denied_reason || "Request was denied.";
+        }
+        if (run.status === "requires_approval") {
+          return "Human approval is required before this request can continue.";
+        }
+        if (run.status === "approved") {
+          return "Human approval was recorded.";
+        }
+        if (run.tool === "sql" && Array.isArray(run.result?.rows)) {
+          return `SQL tool completed with ${run.result.rows.length} row(s).`;
+        }
+        if (run.status === "running" || run.status === "requested") {
+          return "Agent accepted the request and is waiting for tool output.";
+        }
+        return "No agent output is available yet.";
+      }
+
+      function renderAgentIo(input, output, requiresApproval = false) {
+        els.agentIo.hidden = false;
+        els.agentInputOutput.textContent = input || "(no input message)";
+        els.agentOutput.textContent = output || "No agent output is available yet.";
+        els.approvalAction.hidden = !requiresApproval;
+        els.approveBtn.disabled = !requiresApproval;
+      }
+
+      function stopPolling() {
+        if (state.pollTimer) {
+          window.clearTimeout(state.pollTimer);
+          state.pollTimer = null;
+        }
+      }
+
+      function clearSqlOutput() {
+        els.sqlOutput.hidden = true;
+        els.sqlStatus.textContent = "Waiting";
+        els.sqlStatus.className = "pill";
+        els.sqlOutputBody.replaceChildren();
+      }
+
+      function showSqlMessage(message, type = "") {
+        els.sqlOutput.hidden = false;
+        els.sqlStatus.textContent = type === "ok" ? "Ready" : type === "error" ? "Error" : "Waiting";
+        els.sqlStatus.className = `pill ${type}`.trim();
+        const node = document.createElement("div");
+        node.className = "sql-empty";
+        node.textContent = message;
+        els.sqlOutputBody.replaceChildren(node);
+      }
+
+      function renderSqlRows(rows) {
+        const table = document.createElement("table");
+        table.className = "sql-table";
+        const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+
+        const thead = document.createElement("thead");
+        const headerRow = document.createElement("tr");
+        columns.forEach((column) => {
+          const cell = document.createElement("th");
+          cell.textContent = column;
+          headerRow.append(cell);
+        });
+        thead.append(headerRow);
+
+        const tbody = document.createElement("tbody");
+        rows.forEach((row) => {
+          const tableRow = document.createElement("tr");
+          columns.forEach((column) => {
+            const cell = document.createElement("td");
+            const value = row[column];
+            cell.textContent =
+              value === null || value === undefined
+                ? ""
+                : typeof value === "object"
+                  ? JSON.stringify(value)
+                  : String(value);
+            tableRow.append(cell);
+          });
+          tbody.append(tableRow);
+        });
+
+        table.append(thead, tbody);
+        els.sqlOutputBody.replaceChildren(table);
+        els.sqlOutput.hidden = false;
+        els.sqlStatus.textContent = `${rows.length} rows`;
+        els.sqlStatus.className = "pill ok";
+      }
+
+      function renderRunResult(run) {
+        state.latestRun = run;
+        renderAgentIo(
+          run.message || state.currentInput,
+          outputTextForRun(run),
+          run.status === "requires_approval",
+        );
+
+        if (run.tool !== "sql") {
+          if (run.status === "running" || run.status === "requested") {
+            showSqlMessage("Waiting for a SQL tool response...");
+          } else if (run.status === "denied") {
+            showSqlMessage(run.denied_reason || "Request was denied before SQL ran.", "error");
+          } else if (run.status === "requires_approval") {
+            showSqlMessage("This request requires approval, so no SQL response was produced.");
+          } else if (run.status === "approved") {
+            showSqlMessage("Human approval recorded. No SQL response was produced.");
+          } else if (run.tool) {
+            showSqlMessage(`Completed tool was ${run.tool}, not sql.`);
+          }
+          return;
+        }
+
+        if (run.status === "failed") {
+          showSqlMessage(pretty(run.result || { error: "SQL tool failed" }), "error");
+          return;
+        }
+
+        const rows = run.result?.rows;
+        if (Array.isArray(rows)) {
+          if (rows.length === 0) {
+            showSqlMessage("SQL completed successfully and returned 0 rows.", "ok");
+          } else {
+            renderSqlRows(rows);
+          }
+          return;
+        }
+
+        showSqlMessage("SQL tool is still running...");
+      }
+
+      function isTerminalRunStatus(status) {
+        return !["requested", "running"].includes(status);
+      }
+
+      async function pollRunStatus(runId, attempt = 1) {
+        try {
+          const response = await fetch(`/runs/${runId}`, {
+            headers: {
+              Authorization: `Bearer ${state.token}`,
+            },
+          });
+          const run = await response.json();
+
+          if (!response.ok) {
+            throw new Error(run.detail || `Run status failed: ${response.status}`);
+          }
+
+          renderRunResult(run);
+          els.responseOutput.textContent = pretty({
+            initial_response: state.initialResponse,
+            latest_run_status: run,
+          });
+
+          if (!isTerminalRunStatus(run.status) && attempt < 30) {
+            state.pollTimer = window.setTimeout(
+              () => pollRunStatus(runId, attempt + 1),
+              800,
+            );
+          } else if (!isTerminalRunStatus(run.status)) {
+            showSqlMessage("Still waiting for SQL response. Check worker logs if this takes longer.");
+          }
+        } catch (error) {
+          showSqlMessage(`Run status polling failed: ${error.message}`, "error");
+        }
+      }
+
+      async function approveRun() {
+        if (!state.currentRunId || !state.token) {
+          setMessage("Run approval is not available yet.", "error");
+          return;
+        }
+
+        els.approveBtn.disabled = true;
+        setMessage("Recording human approval...");
+
+        try {
+          const response = await fetch(`/runs/${state.currentRunId}/approve`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${state.token}`,
+            },
+          });
+          const run = await response.json();
+          if (!response.ok) {
+            throw new Error(run.detail || `Approval failed: ${response.status}`);
+          }
+
+          renderRunResult(run);
+          els.responseOutput.textContent = pretty({
+            initial_response: state.initialResponse,
+            latest_run_status: run,
+          });
+          setMessage("Human approval recorded.", "ok");
+        } catch (error) {
+          els.approveBtn.disabled = false;
+          setMessage(`Approval failed: ${error.message}`, "error");
+        }
+      }
+
+      function setLoggedOut() {
+        stopPolling();
+        state.token = "";
+        state.claims = null;
+        state.currentInput = "";
+        state.currentRunId = "";
+        state.initialResponse = null;
+        state.latestRun = null;
+        els.tokenStatus.textContent = "Not logged in";
+        els.tokenStatus.className = "pill warn";
+        els.activeUser.textContent = "No user";
+        els.copyTokenBtn.disabled = true;
+        els.runBtn.disabled = true;
+        els.responseOutput.textContent = "Login, then run a sample message.";
+        clearAgentIo();
+        clearSqlOutput();
+        renderClaims();
+        renderAccess();
+      }
+
+      function setLoggedIn(token) {
+        state.token = token;
+        state.claims = decodeJwt(token);
+        const username = state.claims.preferred_username || els.username.value;
+        els.tokenStatus.textContent = "Token ready";
+        els.tokenStatus.className = "pill ok";
+        els.activeUser.textContent = username;
+        els.activeUser.className = "pill ok";
+        els.copyTokenBtn.disabled = false;
+        els.runBtn.disabled = false;
+        renderClaims();
+        renderAccess();
+      }
+
+      function applyPreset(index) {
+        const user = users[index];
+        els.username.value = user.username;
+        els.password.value = user.password;
+        els.agentId.value = user.agent;
+        els.message.value = user.message;
+      }
+
+      function renderUsers() {
+        users.forEach((user, index) => {
+          const option = document.createElement("option");
+          option.value = String(index);
+          option.textContent = user.label;
+          els.userPreset.append(option);
+        });
+        applyPreset(0);
+      }
+
+      function renderSamples() {
+        samples.forEach((sample) => {
+          const button = document.createElement("button");
+          button.className = "sample-btn";
+          button.type = "button";
+          button.setAttribute(
+            "aria-label",
+            `${sample.title}. ${sample.description} Message: ${sample.message}`,
+          );
+
+          const title = document.createElement("span");
+          title.className = "sample-title";
+          title.textContent = sample.title;
+
+          const desc = document.createElement("span");
+          desc.className = "sample-desc";
+          desc.textContent = sample.description;
+
+          const meta = document.createElement("span");
+          meta.className = "sample-meta";
+          [
+            `User: ${sample.user}`,
+            `Agent: ${sample.agent}`,
+            `Expected: ${sample.expected}`,
+            `Message: ${sample.message}`,
+          ].forEach((text) => {
+            const chip = document.createElement("span");
+            chip.className = "sample-chip";
+            chip.textContent = text;
+            meta.append(chip);
+          });
+
+          button.append(title, desc, meta);
+          button.addEventListener("click", () => {
+            els.agentId.value = sample.agent;
+            els.message.value = sample.message;
+            setMessage(
+              `Selected ${sample.title}. Recommended login user: ${sample.user}.`,
+            );
+          });
+          els.sampleGrid.append(button);
+        });
+      }
+
+      async function loadConfig() {
+        const response = await fetch("/ui/config");
+        if (!response.ok) {
+          throw new Error(`Config request failed: ${response.status}`);
+        }
+        state.config = await response.json();
+        els.configStatus.textContent = state.config.keycloakIssuer;
+        els.configStatus.className = "pill ok";
+        renderAccess();
+      }
+
+      async function login() {
+        if (!state.config) {
+          setMessage("UI config is not loaded yet.", "error");
+          return;
+        }
+
+        els.loginBtn.disabled = true;
+        setMessage("Requesting Keycloak token...");
+
+        const body = new URLSearchParams();
+        body.set("client_id", state.config.keycloakClientId);
+        body.set("grant_type", "password");
+        body.set("username", els.username.value);
+        body.set("password", els.password.value);
+
+        try {
+          const response = await fetch(state.config.keycloakTokenUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body,
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(data.error_description || data.error || response.statusText);
+          }
+
+          setLoggedIn(data.access_token);
+          setMessage("Login succeeded. Token contains tenant and role claims.", "ok");
+        } catch (error) {
+          setLoggedOut();
+          setMessage(`Login failed: ${error.message}`, "error");
+        } finally {
+          els.loginBtn.disabled = false;
+        }
+      }
+
+      async function runAgent() {
+        if (!state.token) {
+          setMessage("Login before running an agent.", "error");
+          return;
+        }
+
+        stopPolling();
+        state.currentInput = els.message.value;
+        state.currentRunId = "";
+        clearAgentIo();
+        clearSqlOutput();
+        els.runBtn.disabled = true;
+        els.responseOutput.textContent = "Running request...";
+        state.initialResponse = null;
+        state.latestRun = null;
+        renderAgentIo(state.currentInput, "Sending request to the agent...");
+
+        try {
+          const response = await fetch(`/agents/${els.agentId.value}/runs`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${state.token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ message: els.message.value }),
+          });
+          const data = await response.json();
+          state.initialResponse = {
+            http_status: response.status,
+            body: data,
+          };
+          state.currentRunId = data.run_id || data.request_id || "";
+          els.responseOutput.textContent = pretty({
+            initial_response: state.initialResponse,
+            next_log_check:
+              "docker compose logs -f orchestrator sql-worker report-worker db-access",
+          });
+
+          if (!response.ok) {
+            renderAgentIo(state.currentInput, data.detail || "Gateway rejected the request.");
+            setMessage(`Gateway rejected the request with HTTP ${response.status}.`, "error");
+          } else if (data.status === "denied") {
+            renderAgentIo(
+              state.currentInput,
+              data.denied_reason || "Request was denied before tool execution.",
+            );
+            showSqlMessage(data.denied_reason || "Request was denied before SQL ran.", "error");
+            setMessage("Request reached the orchestrator and was denied by tool permissions.", "error");
+          } else if (data.status === "requires_approval") {
+            renderAgentIo(
+              state.currentInput,
+              "Human approval is required before this request can continue.",
+              true,
+            );
+            showSqlMessage("This request requires approval, so no SQL response was produced.");
+            setMessage("Request reached the orchestrator and requires approval.");
+          } else {
+            renderAgentIo(
+              state.currentInput,
+              "Agent accepted the request and is waiting for tool output.",
+            );
+            showSqlMessage("Waiting for SQL worker response...");
+            setMessage("Request accepted. Waiting for SQL response from the worker.", "ok");
+            pollRunStatus(state.currentRunId);
+          }
+        } catch (error) {
+          els.responseOutput.textContent = pretty({ error: error.message });
+          renderAgentIo(state.currentInput, `Run failed: ${error.message}`);
+          setMessage(`Run failed: ${error.message}`, "error");
+        } finally {
+          els.runBtn.disabled = Boolean(!state.token);
+        }
+      }
+
+      els.userPreset.addEventListener("change", () => {
+        applyPreset(Number(els.userPreset.value));
+      });
+      els.loginBtn.addEventListener("click", login);
+      els.runBtn.addEventListener("click", runAgent);
+      els.approveBtn.addEventListener("click", approveRun);
+      els.resetMessageBtn.addEventListener("click", () => {
+        applyPreset(Number(els.userPreset.value));
+      });
+      els.clearBtn.addEventListener("click", () => {
+        setLoggedOut();
+        setMessage("Cleared local token state.");
+      });
+      els.copyTokenBtn.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(state.token);
+        setMessage("Access token copied to clipboard.", "ok");
+      });
+
+      document.querySelectorAll(".tab").forEach((tab) => {
+        tab.addEventListener("click", () => {
+          const target = tab.dataset.tab;
+          document.querySelectorAll(".tab").forEach((item) => item.classList.remove("active"));
+          tab.classList.add("active");
+          els.responseOutput.hidden = target !== "response";
+          els.claimsOutput.hidden = target !== "claims";
+        });
+      });
+
+      renderUsers();
+      renderSamples();
+      setLoggedOut();
+      loadConfig().catch((error) => {
+        els.configStatus.textContent = "Config failed";
+        els.configStatus.className = "pill warn";
+        setMessage(error.message, "error");
+      });
+    </script>
+  </body>
+</html>
