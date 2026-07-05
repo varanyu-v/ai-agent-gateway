@@ -357,6 +357,18 @@
         overflow-wrap: anywhere;
       }
 
+      .sample-chip.allowed {
+        border-color: #acd8c7;
+        background: #e8f7f1;
+        color: var(--ok);
+      }
+
+      .sample-chip.blocked {
+        border-color: #f3b3ad;
+        background: #fff1f0;
+        color: var(--bad);
+      }
+
       .role-table {
         width: 100%;
         border-collapse: collapse;
@@ -878,6 +890,7 @@
           password: "world-password",
           agent: "world-agent",
           message: "show the largest cities by population with country context",
+          roles: ["agent:world-agent:invoke", "permission:world-db:read"],
         },
         {
           label: "Procurement analyst",
@@ -885,6 +898,7 @@
           password: "procurement-password",
           agent: "procurement-agent",
           message: "rank suppliers by total purchase spend and risk",
+          roles: ["agent:procurement-agent:invoke", "permission:procurement-db:read"],
         },
         {
           label: "Source auditor",
@@ -892,6 +906,11 @@
           password: "auditor-password",
           agent: "procurement-agent",
           message: "rank suppliers by total purchase spend and risk",
+          roles: [
+            "agent:world-agent:invoke",
+            "agent:procurement-agent:invoke",
+            "permission:world-db:read",
+          ],
         },
         {
           label: "Data admin",
@@ -899,6 +918,12 @@
           password: "data-admin-password",
           agent: "procurement-agent",
           message: "remove blocked supplier records from the procurement source",
+          roles: [
+            "agent:world-agent:invoke",
+            "agent:procurement-agent:invoke",
+            "permission:world-db:read",
+            "permission:procurement-db:read",
+          ],
         },
       ];
 
@@ -911,6 +936,7 @@
           description:
             "Queries the World DB source and returns city, country, continent, district, and population rows.",
           expected: "World DB rows",
+          requiredPermission: "world-db",
         },
         {
           title: "Market Entry Report",
@@ -920,6 +946,7 @@
           description:
             "Exercises the report worker through the World DB permission path without granting procurement access.",
           expected: "Report ready",
+          requiredPermission: "world-db",
         },
         {
           title: "Procurement Spend Radar",
@@ -929,6 +956,7 @@
           description:
             "Queries the second procurement database and ranks suppliers by spend, order count, and risk level.",
           expected: "Supplier spend rows",
+          requiredPermission: "procurement-db",
         },
         {
           title: "Source Permission Denial",
@@ -938,6 +966,7 @@
           description:
             "Proves agent access and database permission are separate by calling procurement without procurement-db read.",
           expected: "Permission denied",
+          requiredPermission: "procurement-db",
         },
         {
           title: "Human Approval Gate",
@@ -947,6 +976,7 @@
           description:
             "Triggers the approval branch for a destructive procurement-data request and reveals the approval button.",
           expected: "Needs approval",
+          requiredPermission: "procurement-db",
         },
       ];
 
@@ -1030,6 +1060,35 @@
         els.claimsOutput.textContent = pretty(view);
       }
 
+      function activeUsername() {
+        return state.claims?.preferred_username || els.username.value || "";
+      }
+
+      function seededUser(username) {
+        return users.find((user) => user.username === username);
+      }
+
+      function activeRoles() {
+        if (state.claims) {
+          return new Set(state.claims.realm_access?.roles || []);
+        }
+        return new Set(seededUser(activeUsername())?.roles || []);
+      }
+
+      function agentRole(agentId) {
+        return (
+          (state.config?.agents || []).find((agent) => agent.id === agentId)?.role ||
+          `agent:${agentId}:invoke`
+        );
+      }
+
+      function permissionRole(permissionId) {
+        return (
+          (state.config?.tools || []).find((tool) => tool.id === permissionId)?.role ||
+          `permission:${permissionId}:read`
+        );
+      }
+
       function accessItem(item, allowed) {
         const wrapper = document.createElement("div");
         wrapper.className = `access-item ${allowed ? "allowed" : "blocked"}`;
@@ -1053,6 +1112,7 @@
       function renderAccess() {
         els.agentAccessList.replaceChildren();
         els.toolAccessList.replaceChildren();
+        renderSamples();
 
         if (!state.claims || !state.config) {
           els.accessPanel.hidden = true;
@@ -1336,7 +1396,14 @@
       }
 
       function renderSamples() {
+        const username = activeUsername();
+        const roles = activeRoles();
+        els.sampleGrid.replaceChildren();
+
         samples.forEach((sample) => {
+          const agentAllowed = roles.has(agentRole(sample.agent));
+          const permissionAllowed = roles.has(permissionRole(sample.requiredPermission));
+          const userMatches = username === sample.user;
           const button = document.createElement("button");
           button.className = "sample-btn";
           button.type = "button";
@@ -1356,16 +1423,34 @@
           const meta = document.createElement("span");
           meta.className = "sample-meta";
           [
-            `User: ${sample.user}`,
-            `Agent: ${sample.agent}`,
-            `Expected: ${sample.expected}`,
-            `Message: ${sample.message}`,
-          ].forEach((text) => {
+            {
+              text: `User: ${sample.user}`,
+              allowed: userMatches,
+              title: userMatches
+                ? `${sample.user} is the current user`
+                : `${username || "Current user"} is not ${sample.user}`,
+            },
+            {
+              text: `Agent: ${sample.agent}`,
+              allowed: agentAllowed,
+              title: `${sample.agent} requires ${agentRole(sample.agent)}`,
+            },
+            {
+              text: `Expected: ${sample.expected}`,
+              allowed: permissionAllowed,
+              title: `${sample.expected} requires ${permissionRole(sample.requiredPermission)}`,
+            },
+          ].forEach(({ text, allowed, title }) => {
             const chip = document.createElement("span");
-            chip.className = "sample-chip";
+            chip.className = `sample-chip ${allowed ? "allowed" : "blocked"}`;
+            chip.title = title;
             chip.textContent = text;
             meta.append(chip);
           });
+          const messageChip = document.createElement("span");
+          messageChip.className = "sample-chip";
+          messageChip.textContent = `Message: ${sample.message}`;
+          meta.append(messageChip);
 
           button.append(title, desc, meta);
           button.addEventListener("click", () => {
@@ -1504,7 +1589,9 @@
 
       els.userPreset.addEventListener("change", () => {
         applyPreset(Number(els.userPreset.value));
+        renderSamples();
       });
+      els.username.addEventListener("input", renderSamples);
       els.loginBtn.addEventListener("click", login);
       els.runBtn.addEventListener("click", runAgent);
       els.approveBtn.addEventListener("click", approveRun);
@@ -1531,7 +1618,6 @@
       });
 
       renderUsers();
-      renderSamples();
       setLoggedOut();
       loadConfig().catch((error) => {
         els.configStatus.textContent = "Config failed";
