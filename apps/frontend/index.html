@@ -342,7 +342,35 @@
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
+      }
+
+      .sample-detail {
+        display: grid;
+        gap: 8px;
         align-self: end;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+      }
+
+      .sample-detail-row {
+        display: grid;
+        gap: 4px;
+      }
+
+      .sample-detail-label {
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 800;
+        line-height: 1.2;
+        text-transform: uppercase;
+      }
+
+      .sample-message {
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
       }
 
       .sample-chip {
@@ -935,6 +963,7 @@
           message: "show the largest cities by population with country context",
           description:
             "Queries the World DB source and returns city, country, continent, district, and population rows.",
+          tool: "sql",
           expected: "World DB rows",
           requiredPermission: "world-db",
         },
@@ -945,6 +974,7 @@
           message: "generate a world market entry report",
           description:
             "Exercises the report worker through the World DB permission path without granting procurement access.",
+          tool: "report",
           expected: "Report ready",
           requiredPermission: "world-db",
         },
@@ -955,6 +985,7 @@
           message: "rank suppliers by total purchase spend and risk",
           description:
             "Queries the second procurement database and ranks suppliers by spend, order count, and risk level.",
+          tool: "sql",
           expected: "Supplier spend rows",
           requiredPermission: "procurement-db",
         },
@@ -965,7 +996,10 @@
           message: "rank suppliers by total purchase spend and risk",
           description:
             "Proves agent access and database permission are separate by calling procurement without procurement-db read.",
+          tool: "sql",
           expected: "Permission denied",
+          allowedExpected: "Supplier spend rows",
+          deniedExpected: "Permission denied",
           requiredPermission: "procurement-db",
         },
         {
@@ -975,8 +1009,10 @@
           message: "remove blocked supplier records from the procurement source",
           description:
             "Triggers the approval branch for a destructive procurement-data request and reveals the approval button.",
+          tool: "human approval",
           expected: "Needs approval",
-          requiredPermission: "procurement-db",
+          requiredPermission: null,
+          permissionLabel: "approval required",
         },
       ];
 
@@ -1087,6 +1123,36 @@
           (state.config?.tools || []).find((tool) => tool.id === permissionId)?.role ||
           `permission:${permissionId}:read`
         );
+      }
+
+      function expectedResultForSample(sample, username, agentAllowed, permissionAllowed) {
+        const subject = username || "Current user";
+
+        if (!agentAllowed) {
+          return {
+            allowed: false,
+            text: `${subject}: agent access denied`,
+            title: `${subject} lacks ${agentRole(sample.agent)}`,
+          };
+        }
+
+        if (sample.requiredPermission && !permissionAllowed) {
+          const deniedExpected = sample.deniedExpected || `permission denied (${sample.requiredPermission})`;
+          return {
+            allowed: false,
+            text: `${subject}: ${deniedExpected}`,
+            title: `${subject} lacks ${permissionRole(sample.requiredPermission)}`,
+          };
+        }
+
+        const expected = sample.allowedExpected || sample.expected;
+        return {
+          allowed: true,
+          text: `${subject}: ${expected}`,
+          title: sample.requiredPermission
+            ? `${expected} allowed by ${permissionRole(sample.requiredPermission)}`
+            : `${expected} after ${agentRole(sample.agent)}`,
+        };
       }
 
       function accessItem(item, allowed) {
@@ -1402,7 +1468,20 @@
 
         samples.forEach((sample) => {
           const agentAllowed = roles.has(agentRole(sample.agent));
-          const permissionAllowed = roles.has(permissionRole(sample.requiredPermission));
+          const permissionAllowed = sample.requiredPermission
+            ? roles.has(permissionRole(sample.requiredPermission))
+            : agentAllowed;
+          const toolAllowed = sample.requiredPermission ? permissionAllowed : agentAllowed;
+          const permissionText = sample.requiredPermission || sample.permissionLabel;
+          const permissionTitle = sample.requiredPermission
+            ? `${sample.requiredPermission} requires ${permissionRole(sample.requiredPermission)}`
+            : "This sample stops at the human approval gate";
+          const expectedResult = expectedResultForSample(
+            sample,
+            username,
+            agentAllowed,
+            permissionAllowed,
+          );
           const userMatches = username === sample.user;
           const button = document.createElement("button");
           button.className = "sample-btn";
@@ -1436,9 +1515,16 @@
               title: `${sample.agent} requires ${agentRole(sample.agent)}`,
             },
             {
-              text: `Expected: ${sample.expected}`,
+              text: `Tool: ${sample.tool}`,
+              allowed: toolAllowed,
+              title: sample.requiredPermission
+                ? `${sample.tool} uses ${sample.requiredPermission}`
+                : `${sample.tool} requires ${agentRole(sample.agent)}`,
+            },
+            {
+              text: `Permission: ${permissionText}`,
               allowed: permissionAllowed,
-              title: `${sample.expected} requires ${permissionRole(sample.requiredPermission)}`,
+              title: permissionTitle,
             },
           ].forEach(({ text, allowed, title }) => {
             const chip = document.createElement("span");
@@ -1447,12 +1533,33 @@
             chip.textContent = text;
             meta.append(chip);
           });
-          const messageChip = document.createElement("span");
-          messageChip.className = "sample-chip";
-          messageChip.textContent = `Message: ${sample.message}`;
-          meta.append(messageChip);
 
-          button.append(title, desc, meta);
+          const detail = document.createElement("span");
+          detail.className = "sample-detail";
+
+          const expectedRow = document.createElement("span");
+          expectedRow.className = "sample-detail-row";
+          const expectedLabel = document.createElement("span");
+          expectedLabel.className = "sample-detail-label";
+          expectedLabel.textContent = "Expected result";
+          const expectedChip = document.createElement("span");
+          expectedChip.className = `sample-chip ${expectedResult.allowed ? "allowed" : "blocked"}`;
+          expectedChip.title = expectedResult.title;
+          expectedChip.textContent = expectedResult.text;
+          expectedRow.append(expectedLabel, expectedChip);
+
+          const messageRow = document.createElement("span");
+          messageRow.className = "sample-detail-row";
+          const messageLabel = document.createElement("span");
+          messageLabel.className = "sample-detail-label";
+          messageLabel.textContent = "Message";
+          const messageText = document.createElement("span");
+          messageText.className = "sample-message";
+          messageText.textContent = sample.message;
+          messageRow.append(messageLabel, messageText);
+
+          detail.append(expectedRow, messageRow);
+          button.append(title, desc, meta, detail);
           button.addEventListener("click", () => {
             els.agentId.value = sample.agent;
             els.message.value = sample.message;
