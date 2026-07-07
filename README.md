@@ -53,8 +53,9 @@ docker compose logs -f gateway orchestrator sql-worker report-worker db-access
 ## Architecture
 
 This view shows the service path and the access model together. Keycloak issues
-realm roles, the gateway checks agent invocation roles, and the orchestrator
-checks source permissions before it emits tool work to Kafka.
+realm roles, the gateway checks agent invocation roles, the orchestrator checks
+source permissions before emitting tool work, and `apps/db_access` enforces the
+final guarded SQL boundary before either database is read.
 
 ```mermaid
 flowchart TD
@@ -81,7 +82,15 @@ flowchart TD
     subgraph tools["Tool execution"]
         kafka["Kafka<br/>agent.requested<br/>tool.requested<br/>tool.completed<br/>audit.events"]
         workers["Workers<br/>SQL worker<br/>Report worker"]
-        db_access["DB Access API<br/>SQL validation<br/>Per-source allowlist<br/>Tenant context"]
+    end
+
+    subgraph db_layer["Database access layer<br/>apps/db_access"]
+        db_query["POST /query<br/>body: database + sql<br/>headers: x-tenant-id, x-user-id"]
+        sql_guard["SQL guard<br/>parse with sqlglot<br/>one read-only SELECT only"]
+        source_router{"Logical database<br/>world or procurement"}
+        world_policy["World source policy<br/>allow: city, country,<br/>country_language, country_flag<br/>max rows: 500"]
+        procurement_policy["Procurement source policy<br/>allow: suppliers, purchase_orders,<br/>supplier_summary<br/>max rows: 500"]
+        blocked_query["Blocked by DB access<br/>write SQL, multi statement,<br/>unknown DB, or disallowed table"]
     end
 
     subgraph sources["Database sources"]
@@ -107,9 +116,17 @@ flowchart TD
     procurement_agent -->|"missing permission"| denied
     orchestrator -->|"Tool request events"| kafka
     kafka -->|"Consume"| workers
-    workers -->|"Authorized query"| db_access
-    db_access -->|"World read-only SQL"| worlddb
-    db_access -->|"Procurement read-only SQL"| procurementdb
+    workers -->|"SQL tool calls /query"| db_query
+    db_query --> sql_guard
+    sql_guard -->|"valid SELECT"| source_router
+    sql_guard -->|"invalid SQL"| blocked_query
+    source_router -->|"database: world"| world_policy
+    source_router -->|"database: procurement"| procurement_policy
+    source_router -->|"unknown database"| blocked_query
+    world_policy -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| worlddb
+    procurement_policy -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| procurementdb
+    world_policy -->|"table not allowlisted"| blocked_query
+    procurement_policy -->|"table not allowlisted"| blocked_query
     workers -->|"Tool result events"| kafka
     kafka -->|"Resume run status"| orchestrator
     frontend -->|"Poll /runs/{run_id}"| gateway
@@ -191,32 +208,62 @@ Workflow behavior:
 - LiteLLM planning is used when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
 - Deterministic fallback routing is used when LiteLLM is not configured or the model call fails.
 
-## Database
+## Database Access Layer
+
+`apps/db_access` is a small FastAPI service that sits behind the SQL worker. In
+the full agent flow, the gateway first checks `agent:{agent_id}:invoke`, the
+orchestrator checks the run's source permission such as `world-db` or
+`procurement-db`, and only then does the SQL worker call `POST /query` on
+`db-access`.
+
+The access layer's job is the database boundary:
+
+1. Pick the logical database from the request body.
+2. Parse SQL with `sqlglot`.
+3. Allow exactly one read-only `SELECT` statement.
+4. Reject table names outside that source's allowlist.
+5. Set `app.tenant_id` and `app.user_id` in the Postgres session.
+6. Wrap the query with a max row limit before returning rows.
+
+Request shape:
+
+```json
+{
+  "database": "world",
+  "sql": "select name, population from city order by population desc limit 3"
+}
+```
+
+Required trusted headers:
+
+```text
+x-tenant-id: demo-tenant
+x-user-id: demo-user
+```
+
+Response shape:
+
+```json
+{
+  "rows": []
+}
+```
 
 Compose points the two logical sources at different databases:
 
 ```bash
-DATABASE_URL=postgresql://world:world123@localhost:5432/world-db
-WORLD_DATABASE_URL=postgresql://world:world123@localhost:5432/world-db
-PROCUREMENT_DATABASE_URL=postgresql://world:world123@localhost:5432/procurement_db
+DATABASE_URL=postgresql://world:world123@postgres:5432/world-db
+WORLD_DATABASE_URL=postgresql://world:world123@postgres:5432/world-db
+PROCUREMENT_DATABASE_URL=postgresql://world:world123@postgres:5432/procurement_db
 ```
 
-World DB allowlist:
+| Logical database | Source permission | Env var | Allowed tables | Max rows |
+| --- | --- | --- | --- | --- |
+| `world` | `world-db` | `WORLD_DATABASE_URL` or `DATABASE_URL` | `city`, `country`, `country_language`, `country_flag` | 500 |
+| `procurement` | `procurement-db` | `PROCUREMENT_DATABASE_URL` | `suppliers`, `purchase_orders`, `supplier_summary` | 500 |
 
-- `city`
-- `country`
-- `country_language`
-- `country_flag`
-
-Procurement DB allowlist:
-
-- `suppliers`
-- `purchase_orders`
-- `supplier_summary`
-
-The DB access layer rejects write statements, multiple statements, unknown
-logical database names, and tables outside each source allowlist. Every query is
-wrapped with a max row limit.
+Unknown logical database names return `404`. Missing configured database URLs
+return `503`. Invalid SQL returns `400`, and disallowed tables return `403`.
 
 ## API Smoke Tests
 
