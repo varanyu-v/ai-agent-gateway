@@ -19,11 +19,116 @@ x-app-env: &app-env
   LITELLM_MODEL: ${LITELLM_MODEL:-}
   LITELLM_API_KEY: ${LITELLM_API_KEY:-}
   LITELLM_TIMEOUT_SECONDS: ${LITELLM_TIMEOUT_SECONDS:-30}
+  OTEL_ENABLED: ${OTEL_ENABLED:-true}
+  OTEL_SERVICE_NAMESPACE: ${OTEL_SERVICE_NAMESPACE:-ai-agent-gateway}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+  GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3000}
+  PROMETHEUS_URL: ${PROMETHEUS_URL:-http://localhost:9090}
+  LOKI_UI_URL: ${LOKI_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bservice%3D%5C%22gateway%5C%22%7D%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
+  TEMPO_UI_URL: ${TEMPO_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
   DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
   WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
   PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
 
 services:
+  tempo:
+    image: grafana/tempo:2.6.1
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - "3200:3200"
+
+  loki:
+    image: grafana/loki:3.2.0
+    command:
+      - -config.file=/etc/loki/loki.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    command:
+      - -config.file=/etc/promtail/promtail.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      loki:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    command:
+      - --config=/etc/otelcol-contrib/config.yml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/otel/collector-config.yaml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "9464:9464"
+    depends_on:
+      tempo:
+        condition: service_started
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.2
     command:
@@ -55,6 +160,8 @@ services:
         condition: service_started
       orchestrator:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
@@ -74,6 +181,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
@@ -95,6 +204,8 @@ services:
         condition: service_healthy
       procurement-db-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
@@ -114,6 +225,8 @@ services:
         condition: service_healthy
       db-access:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   report-worker:
     <<: *app
@@ -123,6 +236,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   kafka:
     image: confluentinc/cp-kafka:7.7.1
@@ -194,6 +309,8 @@ services:
 
 volumes:
   postgres-world-pg18-data:
+  prometheus-data:
+  loki-data:
 
 networks:
   backend:

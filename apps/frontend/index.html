@@ -95,6 +95,19 @@
         gap: 8px;
       }
 
+      .topbar-actions {
+        display: grid;
+        justify-items: end;
+        gap: 8px;
+      }
+
+      .monitor-links {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
       .pill {
         display: inline-flex;
         align-items: center;
@@ -280,6 +293,7 @@
         background: var(--primary);
         color: #fff;
         font-weight: 700;
+        text-decoration: none;
       }
 
       .btn:hover {
@@ -299,6 +313,12 @@
       .btn:disabled {
         cursor: not-allowed;
         opacity: 0.55;
+      }
+
+      .monitor-link {
+        min-height: 32px;
+        padding: 6px 10px;
+        font-size: 12px;
       }
 
       .sample-grid {
@@ -655,6 +675,15 @@
           padding: 16px;
         }
 
+        .topbar-actions {
+          justify-items: start;
+        }
+
+        .monitor-links,
+        .status-row {
+          justify-content: flex-start;
+        }
+
         main {
           padding: 16px;
         }
@@ -694,10 +723,50 @@
           </div>
         </div>
       </div>
-      <div class="status-row">
-        <span class="pill" id="configStatus">Config loading</span>
-        <span class="pill" id="tokenStatus">Not logged in</span>
-        <span class="pill" id="activeUser">No user</span>
+      <div class="topbar-actions">
+        <div class="monitor-links" aria-label="Monitoring tools">
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="grafana"
+            href="http://localhost:3000"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Grafana
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="prometheus"
+            href="http://localhost:9090"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Prometheus
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="loki"
+            href="http://localhost:3000"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Loki
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="tempo"
+            href="http://localhost:3200"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Tempo
+          </a>
+        </div>
+        <div class="status-row">
+          <span class="pill" id="configStatus">Config loading</span>
+          <span class="pill" id="tokenStatus">Not logged in</span>
+          <span class="pill" id="activeUser">No user</span>
+        </div>
       </div>
     </header>
 
@@ -1031,6 +1100,7 @@
         configStatus: document.querySelector("#configStatus"),
         tokenStatus: document.querySelector("#tokenStatus"),
         activeUser: document.querySelector("#activeUser"),
+        monitorLinks: document.querySelectorAll("[data-monitor-id]"),
         userPreset: document.querySelector("#userPreset"),
         username: document.querySelector("#username"),
         password: document.querySelector("#password"),
@@ -1094,6 +1164,20 @@
           roles: state.claims.realm_access?.roles || [],
         };
         els.claimsOutput.textContent = pretty(view);
+      }
+
+      function renderMonitorLinks() {
+        const monitors = state.config?.monitorTools || [];
+        els.monitorLinks.forEach((link) => {
+          const monitor = monitors.find((item) => item.id === link.dataset.monitorId);
+          if (!monitor) {
+            return;
+          }
+
+          link.href = monitor.url;
+          link.textContent = monitor.label;
+          link.title = `Open ${monitor.label}`;
+        });
       }
 
       function activeUsername() {
@@ -1579,6 +1663,7 @@
         state.config = await response.json();
         els.configStatus.textContent = state.config.keycloakIssuer;
         els.configStatus.className = "pill ok";
+        renderMonitorLinks();
         renderAccess();
       }
 

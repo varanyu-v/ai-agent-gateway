@@ -25,6 +25,15 @@ Open the test console:
 http://localhost:8000/ui
 ```
 
+Open observability tools:
+
+```text
+http://localhost:3000    Grafana, admin/admin
+http://localhost:9090    Prometheus metrics
+http://localhost:3100    Loki logs API
+http://localhost:3200    Tempo API, no standalone browser UI
+```
+
 Recommended first run:
 
 1. Select `World analyst`.
@@ -45,8 +54,14 @@ docker compose logs -f gateway orchestrator sql-worker report-worker db-access
 - `apps/orchestrator`: runs LangGraph workflows, plans actions with LiteLLM when configured, emits Kafka events, tracks run status, and records approvals.
 - `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events.
 - `apps/db_access`: validates read-only SQL, allowlists tables per database source, sets tenant/user session context, and limits returned rows.
+- `apps/observability.py`: configures OpenTelemetry traces and metrics for the existing gateway, orchestrator, worker, and DB-access steps.
 - `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, SQL response rendering, agent input/output, and human approval.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
+- `docker/otel/collector-config.yaml`: local OTLP collector pipeline that forwards traces to Tempo and exposes metrics for Prometheus.
+- `docker/prometheus/prometheus.yml`: Prometheus scrape config for app metrics exported by the collector.
+- `docker/tempo/tempo.yaml`: local Tempo storage for trace search through Grafana.
+- `docker/loki/loki.yaml` and `docker/promtail/promtail.yaml`: local Loki log storage and Compose container log shipping.
+- `docker/grafana/provisioning`: Grafana datasource provisioning for Tempo, Prometheus, and Loki.
 - `docker/postgres/init/02-create-procurement-database.sql`: idempotent procurement database and seed data initializer.
 - `sql/rls_example.sql`: illustrative RLS policies for production hardening ideas.
 
@@ -56,6 +71,9 @@ This view shows the service path and the access model together. Keycloak issues
 realm roles, the gateway checks agent invocation roles, the orchestrator checks
 source permissions before emitting tool work, and `apps/db_access` enforces the
 final guarded SQL boundary before either database is read.
+OpenTelemetry spans and metrics are emitted by the existing services and
+forwarded through the local collector to Tempo and Prometheus. Compose container
+logs are shipped to Loki. No extra agent or tool path is added.
 
 ```mermaid
 flowchart TD
@@ -98,6 +116,15 @@ flowchart TD
         procurementdb["Procurement DB<br/>suppliers<br/>purchase_orders<br/>supplier_summary"]
     end
 
+    subgraph telemetry["OpenTelemetry monitoring"]
+        collector["OTLP Collector<br/>grpc 4317<br/>http 4318"]
+        tempo["Tempo<br/>localhost:3200"]
+        prometheus["Prometheus<br/>localhost:9090"]
+        loki["Loki<br/>localhost:3100"]
+        promtail["Promtail<br/>Compose container logs"]
+        grafana["Grafana<br/>localhost:3000"]
+    end
+
     frontend -->|"Login"| keycloak
     keycloak -->|"Access token"| frontend
     keycloak --> agent_roles
@@ -131,6 +158,16 @@ flowchart TD
     kafka -->|"Resume run status"| orchestrator
     frontend -->|"Poll /runs/{run_id}"| gateway
     gateway -->|"Run status"| orchestrator
+    gateway -. "traces + metrics" .-> collector
+    orchestrator -. "traces + metrics" .-> collector
+    workers -. "traces + metrics" .-> collector
+    db_query -. "traces + metrics" .-> collector
+    collector -->|"traces"| tempo
+    prometheus -->|"scrapes metrics"| collector
+    promtail -->|"pushes logs"| loki
+    grafana --> tempo
+    grafana --> prometheus
+    grafana --> loki
 ```
 
 | Layer | What it decides | Current examples |
@@ -152,6 +189,12 @@ flowchart TD
 | DB access | `http://localhost:8003` | Guarded SQL proxy |
 | Kafka | `localhost:29092` | Host-visible Kafka listener |
 | Postgres | `localhost:5432` | World DB plus seeded `procurement_db` |
+| OTLP collector | `localhost:4317`, `localhost:4318`, `localhost:9464` | Receives OpenTelemetry traces and metrics; exposes Prometheus scrape output |
+| Tempo | `http://localhost:3200` | Trace storage API used by Grafana; `/` may return 404 |
+| Prometheus | `http://localhost:9090` | Metrics store scraping the collector's Prometheus exporter |
+| Loki | `http://localhost:3100` | Log storage API used by Grafana |
+| Promtail | internal | Ships Docker Compose container logs to Loki |
+| Grafana | `http://localhost:3000` | Observability UI with Tempo, Prometheus, and Loki datasources |
 
 The Postgres service uses a PG18-safe volume mount:
 
@@ -207,6 +250,56 @@ Workflow behavior:
 - `procurement-agent` can route to `sql` or `approval`.
 - LiteLLM planning is used when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
 - Deterministic fallback routing is used when LiteLLM is not configured or the model call fails.
+
+## Observability Monitoring
+
+The app emits distributed traces and metrics for the existing runtime path only.
+It does not add new agents, workflows, or tools.
+
+Compose sends spans and metrics to the local collector. The collector exports
+traces to Tempo and exposes app metrics for Prometheus on port `9464`:
+
+```bash
+OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_SERVICE_NAMESPACE=ai-agent-gateway
+```
+
+For local processes outside Compose, use the host collector endpoint:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+After running an agent, open `http://localhost:3000` for Grafana
+(`admin` / `admin`). Grafana starts with `Tempo`, `Prometheus`, and `Loki`
+datasources already provisioned.
+Search services such as
+`gateway`, `orchestrator`, `sql-worker`, `report-worker`, and `db-access`.
+Tempo is an API-backed trace store in this stack, so the browser UI for Tempo
+traces is Grafana Explore, not `http://localhost:3200/`.
+
+For a Tempo panel or Explore query, select the `Tempo` datasource (`uid: tempo`).
+For metrics, use the `Prometheus` datasource (`uid: prometheus`). For logs, use
+the `Loki` datasource (`uid: loki`) and filter by labels such as
+`{service="gateway"}` or `{service="orchestrator"}`.
+
+Useful spans include:
+
+- `gateway.agent_call`: user request, agent authorization, orchestrator response.
+- `orchestrator.agent_run`: trusted request handling and LangGraph invocation.
+- `orchestrator.choose_plan_action`: LiteLLM or fallback routing decision.
+- `kafka.publish`: `agent.requested`, `tool.requested`, `tool.completed`, or `audit.events` emission.
+- `worker.sql_tool` and `worker.report_tool`: existing tool execution steps.
+- `db_access.validate_sql` and `db_access.execute_sql`: SQL guard and database read.
+- `gateway.run_status_response`: the user-facing poll that returns the final run result.
+
+Trace context is carried across HTTP automatically and across Kafka in the event
+payload's `trace_context` field. The initial agent-call trace continues through
+the async worker completion path. Status polling and approvals are separate HTTP
+calls, and they include the same `run_id` / `request_id` attributes for search
+and correlation in Grafana and Tempo. Container logs are shipped by Promtail to
+Loki with Compose labels, including the `service` label.
 
 ## Database Access Layer
 

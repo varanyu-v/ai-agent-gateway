@@ -4,9 +4,18 @@ import os
 from typing import Any
 
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+from opentelemetry.trace import SpanKind
+
+from apps.observability import (
+    clean_attributes,
+    inject_trace_context,
+    setup_observability,
+    start_event_span,
+)
 
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
+tracer = setup_observability("report-worker")
 
 
 def decode_event(value: bytes) -> dict[str, Any]:
@@ -23,30 +32,71 @@ async def publish_completed(
         "status": "completed",
         "result": result,
     }
+    traced_completed = inject_trace_context(completed)
 
-    await producer.send_and_wait(
-        "tool.completed",
-        key=event["request_id"].encode(),
-        value=json.dumps(completed).encode(),
-    )
+    with tracer.start_as_current_span(
+        "kafka.publish",
+        kind=SpanKind.PRODUCER,
+        attributes=clean_attributes(
+            {
+                "app.request_id": event.get("request_id"),
+                "app.agent_id": event.get("agent_id"),
+                "app.workflow": event.get("workflow"),
+                "app.tool": event.get("tool"),
+                "app.tool_call_id": event.get("tool_call_id"),
+                "app.run_status": "completed",
+                "messaging.system": "kafka",
+                "messaging.destination.name": "tool.completed",
+                "messaging.operation": "publish",
+            },
+        ),
+    ):
+        await producer.send_and_wait(
+            "tool.completed",
+            key=event["request_id"].encode(),
+            value=json.dumps(traced_completed).encode(),
+        )
 
 
 async def handle_report_tool(
     producer: AIOKafkaProducer,
     event: dict[str, Any],
 ) -> None:
-    report_type = event["input"]["report_type"]
-    report_id = f"{event['request_id']}-{report_type}"
-
-    await publish_completed(
-        producer,
+    with start_event_span(
+        tracer,
+        "worker.report_tool",
         event,
-        {
-            "report_id": report_id,
-            "status": "ready",
-            "download_url": f"https://reports.example.com/{report_id}.pdf",
-        },
-    )
+        attributes=clean_attributes(
+            {
+                "app.request_id": event.get("request_id"),
+                "app.agent_id": event.get("agent_id"),
+                "app.workflow": event.get("workflow"),
+                "app.tool": event.get("tool"),
+                "app.tool_call_id": event.get("tool_call_id"),
+                "app.report_type": event.get("input", {}).get("report_type"),
+                "messaging.system": "kafka",
+                "messaging.destination.name": "tool.requested",
+            },
+        ),
+    ) as span:
+        report_type = event["input"]["report_type"]
+        report_id = f"{event['request_id']}-{report_type}"
+
+        span.set_attributes(
+            {
+                "app.report_id": report_id,
+                "app.run_status": "completed",
+            },
+        )
+        await publish_completed(
+            producer,
+            event,
+            {
+                "report_id": report_id,
+                "status": "ready",
+                "download_url": f"https://reports.example.com/{report_id}.pdf",
+            },
+        )
 
 
 async def main() -> None:

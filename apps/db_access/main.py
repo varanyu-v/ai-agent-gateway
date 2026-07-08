@@ -5,8 +5,11 @@ from typing import Any
 import asyncpg
 import sqlglot
 from fastapi import FastAPI, Header, HTTPException
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 from sqlglot import exp
+
+from apps.observability import clean_attributes, setup_observability
 
 
 WORLD_DB_TABLES = {"city", "country", "country_language", "country_flag"}
@@ -33,30 +36,49 @@ class QueryIn(BaseModel):
     sql: str
 
 
-def validate_query(sql: str, allowed_tables: set[str]) -> None:
-    try:
-        trees = sqlglot.parse(sql)
-    except sqlglot.errors.ParseError as exc:
-        raise HTTPException(status_code=400, detail="SQL parse failed") from exc
+def validate_query(sql: str, allowed_tables: set[str], database: str) -> None:
+    with tracer.start_as_current_span(
+        "db_access.validate_sql",
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                "app.database": database,
+                "app.sql.length": len(sql),
+            },
+        ),
+    ) as span:
+        try:
+            trees = sqlglot.parse(sql)
+        except sqlglot.errors.ParseError as exc:
+            span.set_status(Status(StatusCode.ERROR, "SQL parse failed"))
+            raise HTTPException(status_code=400, detail="SQL parse failed") from exc
 
-    if len(trees) != 1 or trees[0] is None:
-        raise HTTPException(status_code=400, detail="Exactly one SQL statement is allowed")
+        span.set_attribute("app.sql.statement_count", len(trees))
+        if len(trees) != 1 or trees[0] is None:
+            span.set_status(Status(StatusCode.ERROR, "Exactly one SQL statement is allowed"))
+            raise HTTPException(status_code=400, detail="Exactly one SQL statement is allowed")
 
-    tree = trees[0]
-    forbidden = (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Alter, exp.Create)
-    if any(tree.find(kind) for kind in forbidden) or not tree.find(exp.Select):
-        raise HTTPException(
-            status_code=400,
-            detail="Only read-only SELECT queries are allowed",
-        )
+        tree = trees[0]
+        forbidden = (exp.Insert, exp.Update, exp.Delete, exp.Drop, exp.Alter, exp.Create)
+        if any(tree.find(kind) for kind in forbidden) or not tree.find(exp.Select):
+            span.set_status(Status(StatusCode.ERROR, "Only read-only SELECT queries are allowed"))
+            raise HTTPException(
+                status_code=400,
+                detail="Only read-only SELECT queries are allowed",
+            )
 
-    tables = {table.name for table in tree.find_all(exp.Table)}
-    disallowed_tables = tables - allowed_tables
-    if disallowed_tables:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Tables are not allowed: {sorted(disallowed_tables)}",
-        )
+        tables = {table.name for table in tree.find_all(exp.Table)}
+        span.set_attribute("app.sql.tables", sorted(tables))
+        disallowed_tables = tables - allowed_tables
+        if disallowed_tables:
+            span.set_attributes(
+                clean_attributes({"app.sql.disallowed_tables": disallowed_tables}),
+            )
+            span.set_status(Status(StatusCode.ERROR, "Tables are not allowed"))
+            raise HTTPException(
+                status_code=403,
+                detail=f"Tables are not allowed: {sorted(disallowed_tables)}",
+            )
 
 
 @asynccontextmanager
@@ -87,6 +109,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Database Access Layer", lifespan=lifespan)
+tracer = setup_observability("db-access", app)
 
 
 @app.post("/query")
@@ -95,27 +118,61 @@ async def query(
     x_tenant_id: str = Header(),
     x_user_id: str = Header(),
 ) -> dict[str, list[dict[str, Any]]]:
-    config = DATABASE_CONFIGS.get(body.database)
-    if config is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unknown database. Available databases: {sorted(DATABASE_CONFIGS)}",
-        )
+    with tracer.start_as_current_span(
+        "db_access.query",
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                "app.database": body.database,
+                "app.tenant_id": x_tenant_id,
+                "app.user_id": x_user_id,
+                "app.sql.length": len(body.sql),
+            },
+        ),
+    ) as span:
+        config = DATABASE_CONFIGS.get(body.database)
+        if config is None:
+            span.set_status(Status(StatusCode.ERROR, "Unknown database"))
+            raise HTTPException(
+                status_code=404,
+                detail=f"Unknown database. Available databases: {sorted(DATABASE_CONFIGS)}",
+            )
 
-    pool = pools.get(body.database)
-    if pool is None:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Database is not configured: {body.database}",
-        )
+        pool = pools.get(body.database)
+        if pool is None:
+            span.set_status(Status(StatusCode.ERROR, "Database is not configured"))
+            raise HTTPException(
+                status_code=503,
+                detail=f"Database is not configured: {body.database}",
+            )
 
-    validate_query(body.sql, config["allowed_tables"])
+        validate_query(body.sql, config["allowed_tables"], body.database)
 
-    wrapped_sql = f"select * from ({body.sql}) q limit {config['max_rows']}"
-    async with pool.acquire() as conn:
-        async with conn.transaction(readonly=True):
-            await conn.execute("select set_config('app.tenant_id', $1, true)", x_tenant_id)
-            await conn.execute("select set_config('app.user_id', $1, true)", x_user_id)
-            rows = await conn.fetch(wrapped_sql)
+        wrapped_sql = f"select * from ({body.sql}) q limit {config['max_rows']}"
+        with tracer.start_as_current_span(
+            "db_access.execute_sql",
+            kind=SpanKind.CLIENT,
+            attributes=clean_attributes(
+                {
+                    "app.database": body.database,
+                    "app.max_rows": config["max_rows"],
+                    "db.system.name": "postgresql",
+                    "db.operation.name": "SELECT",
+                },
+            ),
+        ) as execute_span:
+            async with pool.acquire() as conn:
+                async with conn.transaction(readonly=True):
+                    await conn.execute(
+                        "select set_config('app.tenant_id', $1, true)",
+                        x_tenant_id,
+                    )
+                    await conn.execute(
+                        "select set_config('app.user_id', $1, true)",
+                        x_user_id,
+                    )
+                    rows = await conn.fetch(wrapped_sql)
+            execute_span.set_attribute("app.rows", len(rows))
 
-    return {"rows": [dict(row) for row in rows]}
+        span.set_attribute("app.rows", len(rows))
+        return {"rows": [dict(row) for row in rows]}
