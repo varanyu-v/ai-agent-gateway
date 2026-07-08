@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "df8017042ff84f31b56a1beac4711c71eada8e7d",
-    "indexed_at": "2026-07-07T08:57:36Z",
+    "commit": "20a1ff5bb6d6693a91eb191397f71bef19b1558f",
+    "indexed_at": "2026-07-07T09:00:28Z",
     "project": "Users-varanyu.vis-Documents-ptvn-bitbucket-ai-agent-gateway",
-    "nodes": 254,
-    "edges": 442,
-    "original_size": 2097152,
-    "compressed_size": 164250,
+    "nodes": 0,
+    "edges": 0,
+    "original_size": 917504,
+    "compressed_size": 126701,
     "compression_level": 3
 }
