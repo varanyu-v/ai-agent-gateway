@@ -12,6 +12,16 @@ from jwt import PyJWKClient
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 
+from apps.authz import (
+    agent_access_rules,
+    allowed_agents,
+    allowed_data_sources,
+    allowed_tools,
+    can_invoke_agent,
+    data_source_access_rules,
+    policy_subjects,
+    tool_access_rules,
+)
 from apps.observability import clean_attributes, setup_observability
 
 
@@ -44,14 +54,6 @@ TEMPO_UI_URL = os.getenv(
     f"{GRAFANA_URL.rstrip('/')}{DEFAULT_TEMPO_EXPLORE_PATH}",
 )
 UI_FILE = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
-AGENT_ROLES = {
-    "world-agent": "agent:world-agent:invoke",
-    "procurement-agent": "agent:procurement-agent:invoke",
-}
-PERMISSION_ROLES = {
-    "world-db": "permission:world-db:read",
-    "procurement-db": "permission:procurement-db:read",
-}
 
 jwks = PyJWKClient(JWKS_URL)
 security = HTTPBearer()
@@ -81,14 +83,10 @@ async def ui_config() -> dict[str, Any]:
         "keycloakTokenUrl": f"{ISSUER}/protocol/openid-connect/token",
         "keycloakClientId": KEYCLOAK_CLIENT_ID,
         "audience": AUDIENCE,
-        "agents": [
-            {"id": agent_id, "role": role}
-            for agent_id, role in sorted(AGENT_ROLES.items())
-        ],
-        "tools": [
-            {"id": permission_name, "role": role}
-            for permission_name, role in sorted(PERMISSION_ROLES.items())
-        ],
+        "policyMode": "casbin",
+        "agents": agent_access_rules(),
+        "tools": data_source_access_rules(),
+        "toolPolicies": tool_access_rules(),
         "monitorTools": [
             {"id": "grafana", "label": "Grafana", "url": GRAFANA_URL},
             {"id": "prometheus", "label": "Prometheus", "url": PROMETHEUS_URL},
@@ -146,17 +144,28 @@ def current_user(
 
 
 def can_access_agent(user: dict[str, Any], agent_id: str) -> bool:
-    roles = set(user["roles"])
-    return f"agent:{agent_id}:invoke" in roles
+    return can_invoke_agent(user, agent_id)
 
 
 def allowed_permissions(user: dict[str, Any]) -> list[str]:
-    roles = set(user["roles"])
-    return sorted(
-        permission_name
-        for permission_name, role_name in PERMISSION_ROLES.items()
-        if role_name in roles
-    )
+    return allowed_data_sources(user)
+
+
+@app.get("/ui/permissions", include_in_schema=False)
+async def ui_permissions(
+    user: dict[str, Any] = Depends(current_user),
+) -> dict[str, Any]:
+    data_sources = allowed_data_sources(user)
+    return {
+        "userId": user["user_id"],
+        "tenantId": user["tenant_id"],
+        "roles": user["roles"],
+        "policySubjects": policy_subjects(user),
+        "allowedAgents": allowed_agents(user),
+        "allowedDataSources": data_sources,
+        "allowedPermissions": data_sources,
+        "allowedTools": allowed_tools(user),
+    }
 
 
 @app.post("/agents/{agent_id}/runs")
@@ -167,6 +176,7 @@ async def run_agent(
 ) -> dict[str, Any]:
     request_id = str(uuid.uuid4())
     permissions = allowed_permissions(user)
+    subjects = policy_subjects(user)
     with tracer.start_as_current_span(
         "gateway.agent_call",
         kind=SpanKind.INTERNAL,
@@ -177,6 +187,7 @@ async def run_agent(
                 "app.tenant_id": user["tenant_id"],
                 "app.user_id": user["user_id"],
                 "app.allowed_permissions": permissions,
+                "app.policy_subject_count": len(subjects),
                 "app.user_message.length": len(body.message),
             },
         ),
@@ -192,6 +203,7 @@ async def run_agent(
             "x-tenant-id": user["tenant_id"],
             "x-user-id": user["user_id"],
             "x-allowed-permissions": ",".join(permissions),
+            "x-policy-subjects": ",".join(subjects),
         }
 
         async with httpx.AsyncClient(base_url=ORCH_URL, timeout=60) as client:

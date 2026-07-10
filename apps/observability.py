@@ -1,5 +1,6 @@
 import logging
 import os
+from base64 import b64encode
 from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
@@ -20,6 +21,7 @@ from opentelemetry.trace import Link, SpanKind, Tracer
 
 
 TRACE_CONTEXT_FIELD = "trace_context"
+_DISABLED_ENV_VALUES = {"0", "false", "no", "off"}
 _CONFIGURED_SERVICES: set[str] = set()
 _HTTPX_INSTRUMENTED = False
 _ASYNCPG_INSTRUMENTED = False
@@ -27,7 +29,13 @@ _LOGGING_INSTRUMENTED = False
 
 
 def _otel_enabled() -> bool:
-    return os.getenv("OTEL_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+    return os.getenv("OTEL_ENABLED", "true").lower() not in _DISABLED_ENV_VALUES
+
+
+def _langfuse_configured() -> bool:
+    if os.getenv("LANGFUSE_ENABLED", "true").lower() in _DISABLED_ENV_VALUES:
+        return False
+    return bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
 
 
 def _traces_endpoint() -> str | None:
@@ -40,6 +48,42 @@ def _traces_endpoint() -> str | None:
         return None
 
     return f"{base_endpoint.rstrip('/')}/v1/traces"
+
+
+def _langfuse_traces_endpoint() -> str | None:
+    if not _langfuse_configured():
+        return None
+
+    explicit_endpoint = os.getenv("LANGFUSE_OTEL_TRACES_ENDPOINT")
+    if explicit_endpoint:
+        return explicit_endpoint
+
+    otel_endpoint = os.getenv("LANGFUSE_OTEL_ENDPOINT")
+    if otel_endpoint:
+        endpoint = otel_endpoint.rstrip("/")
+        if endpoint.endswith("/v1/traces"):
+            return endpoint
+        return f"{endpoint}/v1/traces"
+
+    base_url = (
+        os.getenv("LANGFUSE_BASE_URL")
+        or os.getenv("LANGFUSE_OTEL_HOST")
+        or "https://cloud.langfuse.com"
+    )
+    return f"{base_url.rstrip('/')}/api/public/otel/v1/traces"
+
+
+def _langfuse_headers() -> dict[str, str] | None:
+    if not _langfuse_configured():
+        return None
+
+    public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
+    secret_key = os.environ["LANGFUSE_SECRET_KEY"]
+    auth = b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return {
+        "Authorization": f"Basic {auth}",
+        "x-langfuse-ingestion-version": "4",
+    }
 
 
 def _metrics_endpoint() -> str | None:
@@ -77,20 +121,31 @@ def _resource(service_name: str) -> Resource:
 def setup_observability(service_name: str, app: Any | None = None) -> Tracer:
     global _ASYNCPG_INSTRUMENTED, _HTTPX_INSTRUMENTED, _LOGGING_INSTRUMENTED
 
-    if not _otel_enabled():
+    if not (_otel_enabled() or _langfuse_configured()):
         return trace.get_tracer(service_name)
 
     if service_name not in _CONFIGURED_SERVICES:
         resource = _resource(service_name)
         provider = TracerProvider(resource=resource)
-        endpoint = _traces_endpoint()
+        endpoint = _traces_endpoint() if _otel_enabled() else None
         if endpoint:
             provider.add_span_processor(
                 BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)),
             )
+        langfuse_endpoint = _langfuse_traces_endpoint()
+        langfuse_headers = _langfuse_headers()
+        if langfuse_endpoint and langfuse_headers:
+            provider.add_span_processor(
+                BatchSpanProcessor(
+                    OTLPSpanExporter(
+                        endpoint=langfuse_endpoint,
+                        headers=langfuse_headers,
+                    ),
+                ),
+            )
         trace.set_tracer_provider(provider)
 
-        metrics_endpoint = _metrics_endpoint()
+        metrics_endpoint = _metrics_endpoint() if _otel_enabled() else None
         if metrics_endpoint:
             metric_reader = PeriodicExportingMetricReader(
                 OTLPMetricExporter(endpoint=metrics_endpoint),
@@ -122,9 +177,10 @@ def setup_observability(service_name: str, app: Any | None = None) -> Tracer:
     if not _LOGGING_INSTRUMENTED:
         LoggingInstrumentor().instrument(set_logging_format=True)
         logging.getLogger(__name__).info(
-            "OpenTelemetry configured for service=%s endpoint=%s",
+            "OpenTelemetry configured for service=%s endpoint=%s langfuse=%s",
             service_name,
             _traces_endpoint() or "none",
+            "enabled" if _langfuse_traces_endpoint() else "disabled",
         )
         _LOGGING_INSTRUMENTED = True
 

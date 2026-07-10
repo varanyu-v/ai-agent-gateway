@@ -8,20 +8,20 @@
   "roles": {
     "realm": [
       {
-        "name": "agent:world-agent:invoke",
-        "description": "Can invoke the World DB agent"
+        "name": "role:world-analyst",
+        "description": "World analyst persona; Casbin maps this role to World DB agent, source, and tool access"
       },
       {
-        "name": "agent:procurement-agent:invoke",
-        "description": "Can invoke the procurement agent"
+        "name": "role:procurement-analyst",
+        "description": "Procurement analyst persona; Casbin maps this role to procurement agent, source, and tool access"
       },
       {
-        "name": "permission:world-db:read",
-        "description": "Can read the World DB source"
+        "name": "role:source-auditor",
+        "description": "Source auditor persona; Casbin maps this role to cross-agent access with World DB only"
       },
       {
-        "name": "permission:procurement-db:read",
-        "description": "Can read the procurement database source"
+        "name": "role:data-admin",
+        "description": "Data admin persona; Casbin maps this role to all demo agents, sources, and tools"
       }
     ]
   },
@@ -112,8 +112,7 @@
         }
       ],
       "realmRoles": [
-        "agent:world-agent:invoke",
-        "permission:world-db:read"
+        "role:world-analyst"
       ]
     },
     {
@@ -136,8 +135,7 @@
         }
       ],
       "realmRoles": [
-        "agent:procurement-agent:invoke",
-        "permission:procurement-db:read"
+        "role:procurement-analyst"
       ]
     },
     {
@@ -160,9 +158,7 @@
         }
       ],
       "realmRoles": [
-        "agent:world-agent:invoke",
-        "agent:procurement-agent:invoke",
-        "permission:world-db:read"
+        "role:source-auditor"
       ]
     },
     {
@@ -185,10 +181,7 @@
         }
       ],
       "realmRoles": [
-        "agent:world-agent:invoke",
-        "agent:procurement-agent:invoke",
-        "permission:world-db:read",
-        "permission:procurement-db:read"
+        "role:data-admin"
       ]
     }
   ]

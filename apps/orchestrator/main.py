@@ -14,6 +14,11 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
+from apps.authz import (
+    can_execute_tool,
+    can_read_data_source_subjects,
+    parse_policy_subjects as parse_casbin_subjects,
+)
 from apps.observability import (
     clean_attributes,
     inject_trace_context,
@@ -27,6 +32,7 @@ LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000/v1").rst
 LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL", "")
 LITELLM_TIMEOUT_SECONDS = float(os.getenv("LITELLM_TIMEOUT_SECONDS", "30"))
+_DISABLED_ENV_VALUES = {"0", "false", "no", "off"}
 
 WORKFLOW_ACTIONS = {
     "world": {"approval", "report", "sql"},
@@ -53,6 +59,7 @@ class AgentState(TypedDict):
     agent_id: str
     message: str
     allowed_permissions: list[str]
+    policy_subjects: list[str]
     needs_approval: bool
     denied_reason: str | None
 
@@ -101,6 +108,92 @@ def run_output_for_status(
     if status == "running":
         return "Agent accepted the request and is waiting for tool output."
     return "Agent request was received."
+
+
+def env_enabled(name: str, default: str = "true") -> bool:
+    return os.getenv(name, default).lower() not in _DISABLED_ENV_VALUES
+
+
+def langfuse_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def langfuse_payload(value: Any) -> Any:
+    if env_enabled("LANGFUSE_CAPTURE_CONTENT", "true"):
+        return value
+
+    if isinstance(value, str):
+        return {"content_length": len(value)}
+    if isinstance(value, list):
+        return [
+            {
+                "role": item.get("role"),
+                "content_length": len(str(item.get("content", ""))),
+            }
+            for item in value
+            if isinstance(item, dict)
+        ]
+    return {"content_type": type(value).__name__}
+
+
+def langfuse_planner_context(state: AgentState) -> dict[str, str]:
+    return {
+        "request_id": state["request_id"],
+        "tenant_id": state["tenant_id"],
+        "user_id": state["user_id"],
+        "agent_id": state["agent_id"],
+    }
+
+
+def langfuse_trace_attributes(
+    workflow: str,
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    context = context or {}
+    agent_id = context.get("agent_id")
+    request_id = context.get("request_id")
+    return {
+        "langfuse.trace.name": "agent-run",
+        "langfuse.user.id": context.get("user_id"),
+        "langfuse.session.id": request_id,
+        "langfuse.trace.tags": [
+            "ai-agent-gateway",
+            "llm-planner",
+            f"workflow:{workflow}",
+        ],
+        "langfuse.trace.metadata.agent_id": agent_id,
+        "langfuse.trace.metadata.request_id": request_id,
+        "langfuse.trace.metadata.tenant_id": context.get("tenant_id"),
+        "langfuse.trace.metadata.workflow": workflow,
+    }
+
+
+def litellm_usage_attributes(usage: dict[str, Any] | None) -> dict[str, Any]:
+    if not usage:
+        return {}
+
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    usage_details = {
+        "input": prompt_tokens,
+        "output": completion_tokens,
+        "total": total_tokens,
+    }
+    return clean_attributes(
+        {
+            "gen_ai.usage.input_tokens": prompt_tokens,
+            "gen_ai.usage.output_tokens": completion_tokens,
+            "gen_ai.usage.total_tokens": total_tokens,
+            "langfuse.observation.usage_details": langfuse_json(
+                {
+                    key: value
+                    for key, value in usage_details.items()
+                    if value is not None
+                },
+            ),
+        },
+    )
 
 
 async def consume_tool_completed() -> None:
@@ -194,7 +287,19 @@ def parse_allowed_permissions(header_value: str) -> list[str]:
 
 
 def can_use_permission(state: AgentState, permission: str) -> bool:
-    return permission in state["allowed_permissions"]
+    return can_read_data_source_subjects(
+        state["policy_subjects"],
+        state["tenant_id"],
+        permission,
+    )
+
+
+def can_use_tool(state: AgentState, tool: str) -> bool:
+    return can_execute_tool(
+        state["policy_subjects"],
+        state["tenant_id"],
+        tool,
+    )
 
 
 def fallback_plan_action(workflow: str, message: str) -> str:
@@ -210,7 +315,11 @@ def fallback_plan_action(workflow: str, message: str) -> str:
     return "sql"
 
 
-async def litellm_plan_action(workflow: str, message: str) -> str | None:
+async def litellm_plan_action(
+    workflow: str,
+    message: str,
+    context: dict[str, Any] | None = None,
+) -> str | None:
     with tracer.start_as_current_span(
         "orchestrator.llm_plan",
         kind=SpanKind.CLIENT,
@@ -219,6 +328,13 @@ async def litellm_plan_action(workflow: str, message: str) -> str | None:
                 "app.workflow": workflow,
                 "app.planner.model": LITELLM_MODEL or None,
                 "app.user_message.length": len(message),
+                "gen_ai.operation.name": "chat",
+                "gen_ai.system": "openai",
+                "gen_ai.request.model": LITELLM_MODEL or None,
+                "langfuse.observation.type": "generation",
+                "langfuse.observation.model.name": LITELLM_MODEL or None,
+                "langfuse.observation.metadata.provider": "litellm",
+                **langfuse_trace_attributes(workflow, context),
             },
         ),
     ) as span:
@@ -242,6 +358,10 @@ async def litellm_plan_action(workflow: str, message: str) -> str | None:
                 },
             ],
         }
+        span.set_attribute(
+            "langfuse.observation.input",
+            langfuse_json(langfuse_payload(payload["messages"])),
+        )
         headers = {
             "Authorization": f"Bearer {LITELLM_API_KEY}",
             "Content-Type": "application/json",
@@ -257,11 +377,41 @@ async def litellm_plan_action(workflow: str, message: str) -> str | None:
                 span.set_attribute("http.response.status_code", response.status_code)
                 response.raise_for_status()
 
-            content = response.json()["choices"][0]["message"]["content"]
+            response_body = response.json()
+            content = response_body["choices"][0]["message"]["content"]
+            span.set_attributes(
+                clean_attributes(
+                    {
+                        "gen_ai.response.model": response_body.get("model")
+                        or LITELLM_MODEL,
+                        "langfuse.observation.model.name": response_body.get("model")
+                        or LITELLM_MODEL,
+                        "langfuse.observation.output": langfuse_json(
+                            langfuse_payload(content),
+                        ),
+                    },
+                ),
+            )
+            span.set_attributes(
+                litellm_usage_attributes(response_body.get("usage")),
+            )
             decision = json.loads(content)
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            httpx.HTTPError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             span.record_exception(exc)
-            span.set_attribute("app.planner.result", "fallback")
+            span.set_status(Status(StatusCode.ERROR, "LiteLLM planning failed"))
+            span.set_attributes(
+                {
+                    "app.planner.result": "fallback",
+                    "langfuse.observation.level": "ERROR",
+                    "langfuse.observation.status_message": str(exc),
+                },
+            )
             return None
 
         action = str(decision.get("action", "")).strip().lower()
@@ -277,7 +427,11 @@ async def litellm_plan_action(workflow: str, message: str) -> str | None:
         return None
 
 
-async def choose_plan_action(workflow: str, message: str) -> str:
+async def choose_plan_action(
+    workflow: str,
+    message: str,
+    context: dict[str, Any] | None = None,
+) -> str:
     with tracer.start_as_current_span(
         "orchestrator.choose_plan_action",
         kind=SpanKind.INTERNAL,
@@ -285,10 +439,11 @@ async def choose_plan_action(workflow: str, message: str) -> str:
             {
                 "app.workflow": workflow,
                 "app.user_message.length": len(message),
+                **langfuse_trace_attributes(workflow, context),
             },
         ),
     ) as span:
-        action = await litellm_plan_action(workflow, message)
+        action = await litellm_plan_action(workflow, message, context)
         if action is not None:
             span.set_attributes(
                 {"app.workflow.action": action, "app.planner.source": "litellm"},
@@ -338,6 +493,39 @@ async def deny_permission_access(
     return {"denied_reason": denied_reason}
 
 
+async def deny_tool_access(
+    state: AgentState,
+    workflow: str,
+    tool: str,
+) -> dict[str, Any]:
+    denied_reason = f"User cannot execute tool: {tool}"
+    with tracer.start_as_current_span(
+        "orchestrator.tool_denied",
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                "app.request_id": state["request_id"],
+                "app.agent_id": state["agent_id"],
+                "app.workflow": workflow,
+                "app.tool": tool,
+                "app.denied_reason": denied_reason,
+            },
+        ),
+    ) as span:
+        span.set_status(Status(StatusCode.ERROR, denied_reason))
+        await publish(
+            "audit.events",
+            {
+                **state,
+                "workflow": workflow,
+                "event": "tool_access_denied",
+                "tool": tool,
+                "reason": denied_reason,
+            },
+        )
+    return {"denied_reason": denied_reason}
+
+
 async def world_plan(state: AgentState) -> dict[str, Any]:
     with tracer.start_as_current_span(
         "agent.plan.world",
@@ -348,10 +536,15 @@ async def world_plan(state: AgentState) -> dict[str, Any]:
                 "app.agent_id": state["agent_id"],
                 "app.workflow": "world",
                 "app.allowed_permissions": state["allowed_permissions"],
+                **langfuse_trace_attributes("world", langfuse_planner_context(state)),
             },
         ),
     ) as span:
-        action = await choose_plan_action("world", state["message"])
+        action = await choose_plan_action(
+            "world",
+            state["message"],
+            langfuse_planner_context(state),
+        )
         span.set_attribute("app.workflow.action", action)
 
         if action == "approval":
@@ -365,6 +558,8 @@ async def world_plan(state: AgentState) -> dict[str, Any]:
         if action == "report":
             if not can_use_permission(state, "world-db"):
                 return await deny_permission_access(state, "world", "world-db")
+            if not can_use_tool(state, "report"):
+                return await deny_tool_access(state, "world", "report")
 
             tool_call_id = f"{state['request_id']}:report:1"
             span.set_attributes(
@@ -388,6 +583,8 @@ async def world_plan(state: AgentState) -> dict[str, Any]:
 
         if not can_use_permission(state, "world-db"):
             return await deny_permission_access(state, "world", "world-db")
+        if not can_use_tool(state, "sql"):
+            return await deny_tool_access(state, "world", "sql")
 
         tool_call_id = f"{state['request_id']}:sql:1"
         span.set_attributes({"app.tool": "sql", "app.tool_call_id": tool_call_id})
@@ -425,10 +622,18 @@ async def procurement_plan(state: AgentState) -> dict[str, Any]:
                 "app.agent_id": state["agent_id"],
                 "app.workflow": "procurement",
                 "app.allowed_permissions": state["allowed_permissions"],
+                **langfuse_trace_attributes(
+                    "procurement",
+                    langfuse_planner_context(state),
+                ),
             },
         ),
     ) as span:
-        action = await choose_plan_action("procurement", state["message"])
+        action = await choose_plan_action(
+            "procurement",
+            state["message"],
+            langfuse_planner_context(state),
+        )
         span.set_attribute("app.workflow.action", action)
 
         if action == "approval":
@@ -441,6 +646,8 @@ async def procurement_plan(state: AgentState) -> dict[str, Any]:
 
         if not can_use_permission(state, "procurement-db"):
             return await deny_permission_access(state, "procurement", "procurement-db")
+        if not can_use_tool(state, "sql"):
+            return await deny_tool_access(state, "procurement", "sql")
 
         tool_call_id = f"{state['request_id']}:sql:1"
         span.set_attributes({"app.tool": "sql", "app.tool_call_id": tool_call_id})
@@ -528,14 +735,17 @@ async def run(
     x_tenant_id: str = Header(),
     x_user_id: str = Header(),
     x_allowed_permissions: str = Header(default=""),
+    x_policy_subjects: str = Header(default=""),
 ) -> dict[str, str | None]:
+    allowed_permissions = parse_allowed_permissions(x_allowed_permissions)
     state: AgentState = {
         "request_id": x_request_id,
         "tenant_id": x_tenant_id,
         "user_id": x_user_id,
         "agent_id": agent_id,
         "message": body.message,
-        "allowed_permissions": parse_allowed_permissions(x_allowed_permissions),
+        "allowed_permissions": allowed_permissions,
+        "policy_subjects": parse_casbin_subjects(x_policy_subjects),
         "needs_approval": False,
         "denied_reason": None,
     }
@@ -550,7 +760,18 @@ async def run(
                 "app.tenant_id": x_tenant_id,
                 "app.user_id": x_user_id,
                 "app.allowed_permissions": state["allowed_permissions"],
+                "app.policy_subject_count": len(state["policy_subjects"]),
                 "app.user_message.length": len(body.message),
+                "langfuse.trace.name": "agent-run",
+                "langfuse.user.id": x_user_id,
+                "langfuse.session.id": body.thread_id or x_request_id,
+                "langfuse.trace.tags": ["ai-agent-gateway", agent_id],
+                "langfuse.trace.input": langfuse_json(
+                    langfuse_payload(body.message),
+                ),
+                "langfuse.trace.metadata.agent_id": agent_id,
+                "langfuse.trace.metadata.request_id": x_request_id,
+                "langfuse.trace.metadata.tenant_id": x_tenant_id,
             },
         ),
     ) as span:
@@ -599,6 +820,12 @@ async def run(
                 {
                     "app.run_status": status,
                     "app.denied_reason": result.get("denied_reason"),
+                    "langfuse.trace.output": langfuse_json(
+                        {
+                            "status": status,
+                            "denied_reason": result.get("denied_reason"),
+                        },
+                    ),
                 },
             ),
         )

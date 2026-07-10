@@ -50,8 +50,9 @@ docker compose logs -f gateway orchestrator sql-worker report-worker db-access
 
 ## What Is Included
 
-- `apps/gateway`: validates Keycloak JWTs, checks agent roles, maps source permissions, and forwards trusted context headers.
-- `apps/orchestrator`: runs LangGraph workflows, plans actions with LiteLLM when configured, emits Kafka events, tracks run status, and records approvals.
+- `apps/gateway`: validates Keycloak JWTs, checks agent access through Casbin, derives source permissions, and forwards trusted context headers.
+- `apps/orchestrator`: runs LangGraph workflows, enforces Casbin source/tool policy before dispatch, plans actions with LiteLLM when configured, emits Kafka events, tracks run status, and records approvals.
+- `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
 - `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events.
 - `apps/db_access`: validates read-only SQL, allowlists tables per database source, sets tenant/user session context, and limits returned rows.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the existing gateway, orchestrator, worker, and DB-access steps.
@@ -68,9 +69,9 @@ docker compose logs -f gateway orchestrator sql-worker report-worker db-access
 ## Architecture
 
 This view shows the service path and the access model together. Keycloak issues
-realm roles, the gateway checks agent invocation roles, the orchestrator checks
-source permissions before emitting tool work, and `apps/db_access` enforces the
-final guarded SQL boundary before either database is read.
+coarse persona roles, Casbin maps those role subjects to agent, tool, and
+data-source objects, and `apps/db_access` enforces the final guarded SQL
+boundary before either database is read.
 OpenTelemetry spans and metrics are emitted by the existing services and
 forwarded through the local collector to Tempo and Prometheus. Compose container
 logs are shipped to Loki. No extra agent or tool path is added.
@@ -81,20 +82,20 @@ flowchart TD
 
     subgraph identity["Identity and roles"]
         keycloak["Keycloak OIDC"]
-        agent_roles["Agent roles<br/>agent:world-agent:invoke<br/>agent:procurement-agent:invoke"]
-        permission_roles["Source permission roles<br/>permission:world-db:read<br/>permission:procurement-db:read"]
+        persona_roles["Persona roles<br/>role:world-analyst<br/>role:procurement-analyst<br/>role:source-auditor<br/>role:data-admin"]
+        casbin_policy["Casbin policy<br/>policy/casbin_model.conf<br/>policy/casbin_policy.csv"]
     end
 
     subgraph edge["Gateway access checks"]
-        gateway["Gateway API<br/>JWT validation<br/>agent:{agent_id}:invoke check"]
-        allowed_permissions["Trusted header<br/>x-allowed-permissions<br/>world-db, procurement-db"]
+        gateway["Gateway API<br/>JWT validation<br/>Casbin agent invoke check"]
+        allowed_permissions["Trusted policy context<br/>x-policy-subjects<br/>x-allowed-permissions"]
     end
 
     subgraph agents["Orchestrator agents"]
-        orchestrator["Orchestrator API<br/>LangGraph workflows<br/>LiteLLM planning<br/>Human approval state"]
+        orchestrator["Orchestrator API<br/>LangGraph workflows<br/>Casbin tool/source checks<br/>LiteLLM planning<br/>Human approval state"]
         world_agent["world-agent<br/>tools: sql, report, approval<br/>requires: world-db"]
         procurement_agent["procurement-agent<br/>tools: sql, approval<br/>requires: procurement-db"]
-        denied["Denied run<br/>tool_access_denied audit event"]
+        denied["Denied run<br/>permission/tool audit event"]
     end
 
     subgraph tools["Tool execution"]
@@ -127,14 +128,14 @@ flowchart TD
 
     frontend -->|"Login"| keycloak
     keycloak -->|"Access token"| frontend
-    keycloak --> agent_roles
-    keycloak --> permission_roles
+    keycloak --> persona_roles
+    persona_roles --> casbin_policy
     frontend -->|"Bearer token"| gateway
-    agent_roles -->|"authorizes selected agent"| gateway
-    permission_roles -->|"mapped by gateway"| allowed_permissions
+    casbin_policy -->|"authorizes selected agent"| gateway
+    casbin_policy -->|"maps source/tool access"| allowed_permissions
     gateway --> allowed_permissions
     gateway -->|"Trusted context"| orchestrator
-    allowed_permissions -->|"source permissions"| orchestrator
+    allowed_permissions -->|"Casbin subjects + source context"| orchestrator
     orchestrator --> world_agent
     orchestrator --> procurement_agent
     world_agent -->|"allowed: world-db"| kafka
@@ -172,11 +173,11 @@ flowchart TD
 
 | Layer | What it decides | Current examples |
 | --- | --- | --- |
-| Keycloak roles | Which agent and source claims appear in the JWT | `agent:world-agent:invoke`, `agent:procurement-agent:invoke`, `permission:world-db:read`, `permission:procurement-db:read` |
-| Gateway | Whether the user can invoke the requested agent | `world-agent` requires `agent:world-agent:invoke`; `procurement-agent` requires `agent:procurement-agent:invoke` |
-| Gateway to orchestrator | Which data sources the run may use | `x-allowed-permissions: world-db,procurement-db` |
+| Keycloak roles | Which persona subjects appear in the JWT | `role:world-analyst`, `role:procurement-analyst`, `role:source-auditor`, `role:data-admin` |
+| Casbin policy | Which subjects can use which agent, tool, or source object | `agent:world-agent` `invoke`; `datasource:world-db` `read`; `tool:sql` `execute` |
+| Gateway | Whether the user can invoke the requested agent, and which policy subjects are forwarded | `x-policy-subjects`, `x-allowed-permissions: world-db,procurement-db` |
 | Orchestrator agent | Which workflow and tool path runs | `world-agent` can use SQL, report, or approval; `procurement-agent` can use SQL or approval |
-| Source permission check | Whether a tool request is emitted or denied | World data needs `world-db`; procurement data needs `procurement-db`; missing access emits `tool_access_denied` |
+| Source/tool policy check | Whether a tool request is emitted or denied | World data needs `datasource:world-db`; procurement data needs `datasource:procurement-db`; missing access emits an audit event |
 
 ## Local Services
 
@@ -195,6 +196,8 @@ flowchart TD
 | Loki | `http://localhost:3100` | Log storage API used by Grafana |
 | Promtail | internal | Ships Docker Compose container logs to Loki |
 | Grafana | `http://localhost:3000` | Observability UI with Tempo, Prometheus, and Loki datasources |
+| Langfuse | `http://localhost:3001` | Self-hosted LLM trace UI for planner generations |
+| Langfuse MinIO | `http://localhost:19090` | Local object storage endpoint used by Langfuse media/export flows |
 
 The Postgres service uses a PG18-safe volume mount:
 
@@ -209,10 +212,10 @@ procurement schema without requiring the World DB volume to be deleted.
 
 | Username | Password | Good first test | Roles |
 | --- | --- | --- | --- |
-| `world-analyst` | `world-password` | World DB SQL and report | `agent:world-agent:invoke`, `permission:world-db:read` |
-| `procurement-analyst` | `procurement-password` | Procurement DB SQL | `agent:procurement-agent:invoke`, `permission:procurement-db:read` |
-| `source-auditor` | `auditor-password` | Permission denial | `agent:world-agent:invoke`, `agent:procurement-agent:invoke`, `permission:world-db:read` |
-| `data-admin` | `data-admin-password` | Human approval | `agent:world-agent:invoke`, `agent:procurement-agent:invoke`, `permission:world-db:read`, `permission:procurement-db:read` |
+| `world-analyst` | `world-password` | World DB SQL and report | `role:world-analyst` |
+| `procurement-analyst` | `procurement-password` | Procurement DB SQL | `role:procurement-analyst` |
+| `source-auditor` | `auditor-password` | Permission denial | `role:source-auditor` |
+| `data-admin` | `data-admin-password` | Human approval | `role:data-admin` |
 
 All seeded users have `tenant_id=demo-tenant`. The `agent-frontend` client adds
 the `agent-gateway` audience expected by the gateway.
@@ -226,7 +229,7 @@ The Run Agent panel provides these examples:
 | World Market Hotspots | `world-analyst` | `world-agent` | `show the largest cities by population with country context` | SQL rows from World DB |
 | Market Entry Report | `world-analyst` | `world-agent` | `generate a world market entry report` | Report tool completes with a sample download URL |
 | Procurement Spend Radar | `procurement-analyst` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | SQL rows from `procurement_db` |
-| Source Permission Denial | `source-auditor` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | `denied` because `permission:procurement-db:read` is missing |
+| Source Permission Denial | `source-auditor` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | `denied` because Casbin allows the agent but not `datasource:procurement-db` |
 | Human Approval Gate | `data-admin` | `procurement-agent` | `remove blocked supplier records from the procurement source` | `requires_approval` and an approval button |
 
 Approval currently records the approval and emits audit state. This sample does
@@ -234,15 +237,20 @@ not execute destructive follow-up actions after approval.
 
 ## Workflows And Permissions
 
-The gateway and orchestrator enforce two separate checks:
+The gateway and orchestrator enforce separate Casbin-backed checks:
 
-- Agent access: `agent:world-agent:invoke` or `agent:procurement-agent:invoke`.
-- Source permission access: `permission:world-db:read` or `permission:procurement-db:read`.
+- Agent access: `agent:world-agent` or `agent:procurement-agent` with the `invoke` action.
+- Source permission access: `datasource:world-db` or `datasource:procurement-db` with the `read` action.
+- Tool execution access: `tool:sql` or `tool:report` with the `execute` action.
 
-The seeded realm contains exactly two agent roles and two permission roles.
+The seeded realm contains only coarse persona roles. Fine-grained access is not
+duplicated in Keycloak; it lives in Casbin policy.
 
-The gateway converts Keycloak realm roles into `x-allowed-permissions`. The
-orchestrator checks that list before emitting a `tool.requested` event.
+The Casbin model lives in `policy/casbin_model.conf`, and default policies live
+in `policy/casbin_policy.csv`. The gateway evaluates agent invocation and
+forwards `x-policy-subjects` plus `x-allowed-permissions`; the orchestrator uses
+those subjects to evaluate source and tool policy before emitting a
+`tool.requested` event.
 
 Workflow behavior:
 
@@ -270,6 +278,30 @@ For local processes outside Compose, use the host collector endpoint:
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
+
+Langfuse LLM tracking uses the same OpenTelemetry pipeline. This Compose stack
+runs a self-hosted Langfuse UI at `http://localhost:3001`. App containers send
+Langfuse OTLP traces to the internal service URL `http://langfuse-web:3000`,
+and the orchestrator marks `orchestrator.llm_plan` as a Langfuse `generation`
+with model, input, output, usage, user, run, tenant, and workflow metadata:
+
+```bash
+LANGFUSE_ENABLED=true
+LANGFUSE_PUBLIC_KEY=pk-lf-local-ai-agent-gateway
+LANGFUSE_SECRET_KEY=sk-lf-local-ai-agent-gateway
+LANGFUSE_BASE_URL=http://langfuse-web:3000
+LANGFUSE_PUBLIC_URL=http://localhost:3001
+LANGFUSE_CAPTURE_CONTENT=true
+```
+
+The local Langfuse project is initialized with the same public/secret keys and
+an admin login from `.env.example` (`admin@example.com` / `admin-password`).
+These local defaults are not production secrets. Set `LANGFUSE_CAPTURE_CONTENT=false`
+to send prompt/response lengths instead of the raw planner messages. If you run
+the app processes outside Compose but keep Langfuse in Docker, override
+`LANGFUSE_BASE_URL=http://localhost:3001`. For Langfuse Cloud, set
+`LANGFUSE_BASE_URL` to your Cloud region URL and use keys from that project
+instead of the local defaults.
 
 After running an agent, open `http://localhost:3000` for Grafana
 (`admin` / `admin`). Grafana starts with `Tempo`, `Prometheus`, and `Loki`
@@ -304,10 +336,9 @@ Loki with Compose labels, including the `service` label.
 ## Database Access Layer
 
 `apps/db_access` is a small FastAPI service that sits behind the SQL worker. In
-the full agent flow, the gateway first checks `agent:{agent_id}:invoke`, the
-orchestrator checks the run's source permission such as `world-db` or
-`procurement-db`, and only then does the SQL worker call `POST /query` on
-`db-access`.
+the full agent flow, the gateway first checks `agent:{agent_id}` `invoke`
+through Casbin, the orchestrator checks the run's data-source and tool policy,
+and only then does the SQL worker call `POST /query` on `db-access`.
 
 The access layer's job is the database boundary:
 
@@ -478,6 +509,9 @@ LITELLM_BASE_URL=http://localhost:4000/v1
 LITELLM_MODEL=your-litellm-model-name
 LITELLM_API_KEY=your-litellm-secret-key
 LITELLM_TIMEOUT_SECONDS=30
+LANGFUSE_PUBLIC_KEY=pk-lf-local-ai-agent-gateway
+LANGFUSE_SECRET_KEY=sk-lf-local-ai-agent-gateway
+LANGFUSE_BASE_URL=http://langfuse-web:3000
 ```
 
 For Docker Compose on macOS or Windows, use a host-reachable URL such as:
@@ -523,6 +557,12 @@ Restart everything:
 docker compose up --build -d
 ```
 
+Open the self-hosted Langfuse UI:
+
+```bash
+open http://localhost:3001
+```
+
 Inspect World DB directly:
 
 ```bash
@@ -544,7 +584,7 @@ docker compose up --force-recreate procurement-db-init
 Follow useful logs:
 
 ```bash
-docker compose logs -f gateway orchestrator sql-worker report-worker db-access postgres procurement-db-init
+docker compose logs -f gateway orchestrator sql-worker report-worker db-access langfuse-web langfuse-worker postgres procurement-db-init
 ```
 
 If you edit `docker/keycloak/ptvn-realm.json` after Keycloak has already imported
