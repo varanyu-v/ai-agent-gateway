@@ -1,7 +1,8 @@
 import asyncio
 import json
 import os
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -10,7 +11,10 @@ from fastapi import FastAPI, Header, HTTPException
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.store.memory import InMemoryStore
-from opentelemetry.trace import SpanKind, Status, StatusCode
+from opentelemetry import context as otel_context
+from opentelemetry import trace as otel_trace
+from opentelemetry.context import Context
+from opentelemetry.trace import NonRecordingSpan, Span, SpanKind, Status, StatusCode
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -22,6 +26,7 @@ from apps.authz import (
 from apps.observability import (
     clean_attributes,
     inject_trace_context,
+    setup_langfuse_observability,
     setup_observability,
     start_event_span,
 )
@@ -37,6 +42,10 @@ _DISABLED_ENV_VALUES = {"0", "false", "no", "off"}
 WORKFLOW_ACTIONS = {
     "world": {"approval", "report", "sql"},
     "procurement": {"approval", "sql"},
+}
+AGENT_WORKFLOW_NAMES = {
+    "world-agent": "world",
+    "procurement-agent": "procurement",
 }
 
 LLM_PLANNER_SYSTEM_PROMPT = """
@@ -69,11 +78,26 @@ class RunIn(BaseModel):
     thread_id: str | None = None
 
 
+@dataclass(frozen=True)
+class LangfuseRunTrace:
+    parent_context: Context
+    trace_attributes: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LangfuseToolTrace:
+    request_id: str
+    span: Span
+
+
 producer: AIOKafkaProducer | None = None
 completed_consumer: AIOKafkaConsumer | None = None
 completed_consumer_task: asyncio.Task[None] | None = None
 RUNS: dict[str, dict[str, Any]] = {}
+LANGFUSE_RUN_TRACES: dict[str, LangfuseRunTrace] = {}
+LANGFUSE_TOOL_TRACES: dict[str, LangfuseToolTrace] = {}
 tracer = setup_observability("orchestrator")
+langfuse_tracer = setup_langfuse_observability("orchestrator")
 
 
 def decode_event(value: bytes) -> dict[str, Any]:
@@ -150,21 +174,27 @@ def langfuse_trace_attributes(
     context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     context = context or {}
-    agent_id = context.get("agent_id")
     request_id = context.get("request_id")
+    run_trace = LANGFUSE_RUN_TRACES.get(str(request_id)) if request_id else None
+    if run_trace is not None:
+        return run_trace.trace_attributes
+
     return {
         "langfuse.trace.name": "agent-run",
         "langfuse.user.id": context.get("user_id"),
-        "langfuse.session.id": request_id,
+        "langfuse.session.id": context.get("session_id") or request_id,
         "langfuse.trace.tags": [
             "ai-agent-gateway",
+            "agent",
             "llm-planner",
             f"workflow:{workflow}",
         ],
-        "langfuse.trace.metadata.agent_id": agent_id,
+        "langfuse.trace.input": context.get("trace_input"),
+        "langfuse.trace.metadata.agent_id": context.get("agent_id"),
         "langfuse.trace.metadata.request_id": request_id,
         "langfuse.trace.metadata.tenant_id": context.get("tenant_id"),
         "langfuse.trace.metadata.workflow": workflow,
+        "langfuse.trace.metadata.tempo_trace_id": context.get("tempo_trace_id"),
     }
 
 
@@ -196,6 +226,246 @@ def litellm_usage_attributes(usage: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
+def _trace_id(span: Span) -> str | None:
+    span_context = span.get_span_context()
+    if not span_context.is_valid:
+        return None
+    return f"{span_context.trace_id:032x}"
+
+
+def _langfuse_child_context(span: Span) -> Context | None:
+    span_context = span.get_span_context()
+    if not span_context.is_valid:
+        return None
+    return otel_trace.set_span_in_context(
+        NonRecordingSpan(span_context),
+        Context(),
+    )
+
+
+def _record_span_error(span: Span, exc: BaseException | str) -> None:
+    message = str(exc)
+    if isinstance(exc, BaseException):
+        span.record_exception(exc)
+    span.set_status(Status(StatusCode.ERROR, message))
+    span.set_attributes(
+        {
+            "langfuse.observation.level": "ERROR",
+            "langfuse.observation.status_message": message,
+        },
+    )
+
+
+@contextmanager
+def langfuse_agent_trace(
+    *,
+    request_id: str,
+    session_id: str,
+    tenant_id: str,
+    user_id: str,
+    agent_id: str,
+    workflow: str,
+    message: str,
+):
+    """Create the logical Langfuse root while preserving Tempo trace correlation."""
+    tempo_parent_context = otel_context.get_current()
+    tempo_span = otel_trace.get_current_span(tempo_parent_context)
+    tempo_trace_id = _trace_id(tempo_span)
+    trace_input = langfuse_json(langfuse_payload(message))
+    trace_attributes = clean_attributes(
+        langfuse_trace_attributes(
+            workflow,
+            {
+                "request_id": request_id,
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "tempo_trace_id": tempo_trace_id,
+                "trace_input": trace_input,
+            },
+        ),
+    )
+    span = langfuse_tracer.start_span(
+        "agent-run",
+        context=tempo_parent_context if tempo_trace_id else Context(),
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                **trace_attributes,
+                "app.request_id": request_id,
+                "app.agent_id": agent_id,
+                "app.workflow": workflow,
+                "langfuse.observation.type": "span",
+                "langfuse.observation.input": trace_input,
+                "langfuse.observation.metadata.kind": "agent",
+            },
+        ),
+    )
+    child_context = _langfuse_child_context(span)
+    if child_context is not None:
+        LANGFUSE_RUN_TRACES[request_id] = LangfuseRunTrace(
+            parent_context=child_context,
+            trace_attributes=trace_attributes,
+        )
+
+    try:
+        yield span
+    except BaseException as exc:
+        _record_span_error(span, exc)
+        discard_langfuse_run_trace(request_id, "Agent run failed")
+        raise
+    finally:
+        span.end()
+
+
+@contextmanager
+def langfuse_generation_span(
+    workflow: str,
+    message: str,
+    context: dict[str, Any] | None,
+):
+    """Record a planner generation under the logical Langfuse agent trace."""
+    context = context or {}
+    request_id = context.get("request_id")
+    run_trace = LANGFUSE_RUN_TRACES.get(str(request_id)) if request_id else None
+    span = langfuse_tracer.start_span(
+        "orchestrator.llm_plan",
+        context=run_trace.parent_context if run_trace else Context(),
+        kind=SpanKind.CLIENT,
+        attributes=clean_attributes(
+            {
+                "app.workflow": workflow,
+                "app.planner.model": LITELLM_MODEL or None,
+                "app.user_message.length": len(message),
+                "gen_ai.operation.name": "chat",
+                "gen_ai.system": "openai",
+                "gen_ai.request.model": LITELLM_MODEL or None,
+                "langfuse.observation.type": "generation",
+                "langfuse.observation.model.name": LITELLM_MODEL or None,
+                "langfuse.observation.metadata.kind": "planner",
+                "langfuse.observation.metadata.provider": "litellm",
+                **langfuse_trace_attributes(workflow, context),
+            },
+        ),
+    )
+    try:
+        yield span
+    except BaseException as exc:
+        _record_span_error(span, exc)
+        raise
+    finally:
+        span.end()
+
+
+def _create_langfuse_tool_span(
+    payload: dict[str, Any],
+    run_trace: LangfuseRunTrace,
+) -> Span:
+    request_id = str(payload.get("request_id") or "")
+    tool_call_id = str(payload.get("tool_call_id") or "")
+    tool = str(payload.get("tool") or "unknown")
+    return langfuse_tracer.start_span(
+        f"tool.{tool}",
+        context=run_trace.parent_context,
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                **run_trace.trace_attributes,
+                "app.request_id": request_id,
+                "app.workflow": payload.get("workflow"),
+                "app.tool": tool,
+                "app.tool_call_id": tool_call_id,
+                "langfuse.observation.type": "span",
+                "langfuse.observation.input": langfuse_json(
+                    langfuse_payload(payload.get("input")),
+                ),
+                "langfuse.observation.metadata.kind": "tool",
+                "langfuse.observation.metadata.tool": tool,
+                "langfuse.observation.metadata.tool_call_id": tool_call_id,
+            },
+        ),
+    )
+
+
+def start_langfuse_tool_trace(payload: dict[str, Any]) -> None:
+    request_id = str(payload.get("request_id") or "")
+    tool_call_id = str(payload.get("tool_call_id") or "")
+    run_trace = LANGFUSE_RUN_TRACES.get(request_id)
+    if not request_id or not tool_call_id or run_trace is None:
+        return
+
+    span = _create_langfuse_tool_span(payload, run_trace)
+    LANGFUSE_TOOL_TRACES[tool_call_id] = LangfuseToolTrace(
+        request_id=request_id,
+        span=span,
+    )
+
+
+def fail_langfuse_tool_trace(tool_call_id: str, exc: BaseException | str) -> None:
+    tool_trace = LANGFUSE_TOOL_TRACES.pop(tool_call_id, None)
+    if tool_trace is None:
+        return
+    _record_span_error(tool_trace.span, exc)
+    tool_trace.span.end()
+
+
+def finish_langfuse_tool_trace(event: dict[str, Any], output: str) -> None:
+    request_id = str(event.get("request_id") or "")
+    tool_call_id = str(event.get("tool_call_id") or "")
+    run_trace = LANGFUSE_RUN_TRACES.get(request_id)
+    tool_trace = LANGFUSE_TOOL_TRACES.pop(tool_call_id, None)
+    span = tool_trace.span if tool_trace is not None else None
+
+    if span is None and run_trace is not None:
+        span = _create_langfuse_tool_span(event, run_trace)
+
+    if span is None:
+        return
+
+    status = str(event.get("status") or "completed")
+    result = event.get("result")
+    final_output = {
+        "status": status,
+        "tool": event.get("tool"),
+        "message": output,
+        "result": langfuse_payload(result),
+    }
+    span.set_attributes(
+        clean_attributes(
+            {
+                "app.run_status": status,
+                "langfuse.observation.output": langfuse_json(
+                    langfuse_payload(result),
+                ),
+                "langfuse.trace.output": langfuse_json(final_output),
+            },
+        ),
+    )
+    if status == "failed":
+        _record_span_error(span, "Tool execution failed")
+    span.end()
+    LANGFUSE_RUN_TRACES.pop(request_id, None)
+
+
+def discard_langfuse_run_trace(request_id: str, reason: str | None = None) -> None:
+    for tool_call_id, tool_trace in list(LANGFUSE_TOOL_TRACES.items()):
+        if tool_trace.request_id != request_id:
+            continue
+        LANGFUSE_TOOL_TRACES.pop(tool_call_id, None)
+        if reason:
+            _record_span_error(tool_trace.span, reason)
+        tool_trace.span.end()
+    LANGFUSE_RUN_TRACES.pop(request_id, None)
+
+
+def close_pending_langfuse_traces() -> None:
+    for request_id in list(LANGFUSE_RUN_TRACES):
+        discard_langfuse_run_trace(request_id, "Orchestrator shutting down")
+    for tool_call_id in list(LANGFUSE_TOOL_TRACES):
+        fail_langfuse_tool_trace(tool_call_id, "Orchestrator shutting down")
+
+
 async def consume_tool_completed() -> None:
     if completed_consumer is None:
         return
@@ -224,6 +494,13 @@ async def consume_tool_completed() -> None:
             if event.get("status") == "failed":
                 span.set_status(Status(StatusCode.ERROR, "Tool execution failed"))
 
+            output = run_output_for_status(
+                event.get("status", "completed"),
+                tool=event.get("tool"),
+                result=event.get("result"),
+                denied_reason=event.get("denied_reason"),
+            )
+            finish_langfuse_tool_trace(event, output)
             remember_run(
                 request_id,
                 {
@@ -239,12 +516,7 @@ async def consume_tool_completed() -> None:
                     "input": event.get("input"),
                     "result": event.get("result"),
                     "denied_reason": event.get("denied_reason"),
-                    "output": run_output_for_status(
-                        event.get("status", "completed"),
-                        tool=event.get("tool"),
-                        result=event.get("result"),
-                        denied_reason=event.get("denied_reason"),
-                    ),
+                    "output": output,
                 },
             )
 
@@ -253,29 +525,38 @@ async def publish(topic: str, payload: dict[str, Any]) -> None:
     if producer is None:
         raise RuntimeError("Kafka producer has not been started")
 
+    tool_call_id = str(payload.get("tool_call_id") or "")
+    if topic == "tool.requested":
+        start_langfuse_tool_trace(payload)
+
     traced_payload = inject_trace_context(payload)
-    with tracer.start_as_current_span(
-        "kafka.publish",
-        kind=SpanKind.PRODUCER,
-        attributes=clean_attributes(
-            {
-                "app.request_id": payload.get("request_id"),
-                "app.agent_id": payload.get("agent_id"),
-                "app.workflow": payload.get("workflow"),
-                "app.tool": payload.get("tool"),
-                "app.tool_call_id": payload.get("tool_call_id"),
-                "app.event": payload.get("event"),
-                "messaging.system": "kafka",
-                "messaging.destination.name": topic,
-                "messaging.operation": "publish",
-            },
-        ),
-    ):
-        await producer.send_and_wait(
-            topic,
-            key=payload["request_id"].encode(),
-            value=json.dumps(traced_payload).encode(),
-        )
+    try:
+        with tracer.start_as_current_span(
+            "kafka.publish",
+            kind=SpanKind.PRODUCER,
+            attributes=clean_attributes(
+                {
+                    "app.request_id": payload.get("request_id"),
+                    "app.agent_id": payload.get("agent_id"),
+                    "app.workflow": payload.get("workflow"),
+                    "app.tool": payload.get("tool"),
+                    "app.tool_call_id": payload.get("tool_call_id"),
+                    "app.event": payload.get("event"),
+                    "messaging.system": "kafka",
+                    "messaging.destination.name": topic,
+                    "messaging.operation": "publish",
+                },
+            ),
+        ):
+            await producer.send_and_wait(
+                topic,
+                key=payload["request_id"].encode(),
+                value=json.dumps(traced_payload).encode(),
+            )
+    except BaseException as exc:
+        if tool_call_id:
+            fail_langfuse_tool_trace(tool_call_id, exc)
+        raise
 
 
 def parse_allowed_permissions(header_value: str) -> list[str]:
@@ -320,24 +601,7 @@ async def litellm_plan_action(
     message: str,
     context: dict[str, Any] | None = None,
 ) -> str | None:
-    with tracer.start_as_current_span(
-        "orchestrator.llm_plan",
-        kind=SpanKind.CLIENT,
-        attributes=clean_attributes(
-            {
-                "app.workflow": workflow,
-                "app.planner.model": LITELLM_MODEL or None,
-                "app.user_message.length": len(message),
-                "gen_ai.operation.name": "chat",
-                "gen_ai.system": "openai",
-                "gen_ai.request.model": LITELLM_MODEL or None,
-                "langfuse.observation.type": "generation",
-                "langfuse.observation.model.name": LITELLM_MODEL or None,
-                "langfuse.observation.metadata.provider": "litellm",
-                **langfuse_trace_attributes(workflow, context),
-            },
-        ),
-    ) as span:
+    with langfuse_generation_span(workflow, message, context) as span:
         if not LITELLM_API_KEY or not LITELLM_MODEL:
             span.set_attribute("app.planner.result", "not_configured")
             return None
@@ -439,7 +703,6 @@ async def choose_plan_action(
             {
                 "app.workflow": workflow,
                 "app.user_message.length": len(message),
-                **langfuse_trace_attributes(workflow, context),
             },
         ),
     ) as span:
@@ -536,7 +799,6 @@ async def world_plan(state: AgentState) -> dict[str, Any]:
                 "app.agent_id": state["agent_id"],
                 "app.workflow": "world",
                 "app.allowed_permissions": state["allowed_permissions"],
-                **langfuse_trace_attributes("world", langfuse_planner_context(state)),
             },
         ),
     ) as span:
@@ -622,10 +884,6 @@ async def procurement_plan(state: AgentState) -> dict[str, Any]:
                 "app.agent_id": state["agent_id"],
                 "app.workflow": "procurement",
                 "app.allowed_permissions": state["allowed_permissions"],
-                **langfuse_trace_attributes(
-                    "procurement",
-                    langfuse_planner_context(state),
-                ),
             },
         ),
     ) as span:
@@ -718,6 +976,7 @@ async def lifespan(app: FastAPI):
         if completed_consumer is not None:
             await completed_consumer.stop()
         await producer.stop()
+        close_pending_langfuse_traces()
         completed_consumer_task = None
         completed_consumer = None
         producer = None
@@ -762,16 +1021,6 @@ async def run(
                 "app.allowed_permissions": state["allowed_permissions"],
                 "app.policy_subject_count": len(state["policy_subjects"]),
                 "app.user_message.length": len(body.message),
-                "langfuse.trace.name": "agent-run",
-                "langfuse.user.id": x_user_id,
-                "langfuse.session.id": body.thread_id or x_request_id,
-                "langfuse.trace.tags": ["ai-agent-gateway", agent_id],
-                "langfuse.trace.input": langfuse_json(
-                    langfuse_payload(body.message),
-                ),
-                "langfuse.trace.metadata.agent_id": agent_id,
-                "langfuse.trace.metadata.request_id": x_request_id,
-                "langfuse.trace.metadata.tenant_id": x_tenant_id,
             },
         ),
     ) as span:
@@ -800,55 +1049,83 @@ async def run(
                 detail=f"Unknown agent_id. Available agents: {sorted(WORKFLOWS)}",
             )
 
-        await publish("agent.requested", state)
-        result = await workflow.ainvoke(
-            state,
-            {"configurable": {"thread_id": body.thread_id or x_request_id}},
-        )
+        workflow_name = AGENT_WORKFLOW_NAMES.get(agent_id, agent_id)
+        with langfuse_agent_trace(
+            request_id=x_request_id,
+            session_id=body.thread_id or x_request_id,
+            tenant_id=x_tenant_id,
+            user_id=x_user_id,
+            agent_id=agent_id,
+            workflow=workflow_name,
+            message=body.message,
+        ) as langfuse_span:
+            await publish("agent.requested", state)
+            result = await workflow.ainvoke(
+                state,
+                {"configurable": {"thread_id": body.thread_id or x_request_id}},
+            )
 
-        if result.get("denied_reason"):
-            status = "denied"
-        elif result["needs_approval"]:
-            status = "requires_approval"
-        else:
-            status = "running"
+            if result.get("denied_reason"):
+                status = "denied"
+            elif result["needs_approval"]:
+                status = "requires_approval"
+            else:
+                status = "running"
 
-        if status == "denied":
-            span.set_status(Status(StatusCode.ERROR, result.get("denied_reason")))
-        span.set_attributes(
-            clean_attributes(
-                {
-                    "app.run_status": status,
-                    "app.denied_reason": result.get("denied_reason"),
-                    "langfuse.trace.output": langfuse_json(
-                        {
-                            "status": status,
-                            "denied_reason": result.get("denied_reason"),
-                        },
-                    ),
-                },
-            ),
-        )
+            denied_reason = result.get("denied_reason")
+            output = run_output_for_status(
+                status,
+                denied_reason=denied_reason,
+            )
+            if status == "denied":
+                span.set_status(Status(StatusCode.ERROR, denied_reason))
+                _record_span_error(langfuse_span, denied_reason or "Agent run denied")
+            span.set_attributes(
+                clean_attributes(
+                    {
+                        "app.run_status": status,
+                        "app.denied_reason": denied_reason,
+                    },
+                ),
+            )
 
-        remember_run(
-            x_request_id,
-            {
+            langfuse_output = {
                 "status": status,
                 "agent_id": agent_id,
-                "denied_reason": result.get("denied_reason"),
-                "output": run_output_for_status(
-                    status,
-                    denied_reason=result.get("denied_reason"),
+                "message": output,
+                "denied_reason": denied_reason,
+            }
+            langfuse_span.set_attributes(
+                clean_attributes(
+                    {
+                        "app.run_status": status,
+                        "app.denied_reason": denied_reason,
+                        "langfuse.observation.output": langfuse_json(langfuse_output),
+                        "langfuse.observation.metadata.status": status,
+                        "langfuse.trace.output": langfuse_json(langfuse_output),
+                    },
                 ),
-            },
-        )
+            )
 
-        return {
-            "run_id": x_request_id,
-            "status": status,
-            "agent_id": agent_id,
-            "denied_reason": result.get("denied_reason"),
-        }
+            remember_run(
+                x_request_id,
+                {
+                    "status": status,
+                    "agent_id": agent_id,
+                    "denied_reason": denied_reason,
+                    "output": output,
+                },
+            )
+
+            if status != "running":
+                discard_langfuse_run_trace(x_request_id)
+
+            return {
+                "run_id": x_request_id,
+                "status": status,
+                "agent_id": agent_id,
+                "denied_reason": denied_reason,
+            }
 
 
 @app.get("/internal/runs/{run_id}")

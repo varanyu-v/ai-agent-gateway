@@ -122,6 +122,7 @@ flowchart TD
         tempo["Tempo<br/>localhost:3200"]
         prometheus["Prometheus<br/>localhost:9090"]
         loki["Loki<br/>localhost:3100"]
+        langfuse["Langfuse<br/>localhost:3001<br/>Logical AI trace"]
         promtail["Promtail<br/>Compose container logs"]
         grafana["Grafana<br/>localhost:3000"]
     end
@@ -161,6 +162,7 @@ flowchart TD
     gateway -->|"Run status"| orchestrator
     gateway -. "traces + metrics" .-> collector
     orchestrator -. "traces + metrics" .-> collector
+    orchestrator -. "agent + generation + tool" .-> langfuse
     workers -. "traces + metrics" .-> collector
     db_query -. "traces + metrics" .-> collector
     collector -->|"traces"| tempo
@@ -279,11 +281,16 @@ For local processes outside Compose, use the host collector endpoint:
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
-Langfuse LLM tracking uses the same OpenTelemetry pipeline. This Compose stack
-runs a self-hosted Langfuse UI at `http://localhost:3001`. App containers send
-Langfuse OTLP traces to the internal service URL `http://langfuse-web:3000`,
-and the orchestrator marks `orchestrator.llm_plan` as a Langfuse `generation`
-with model, input, output, usage, user, run, tenant, and workflow metadata:
+Langfuse LLM tracking uses a dedicated OpenTelemetry tracer. This Compose stack
+runs a self-hosted Langfuse UI at `http://localhost:3001`. The orchestrator
+sends a logical AI trace containing the `agent-run` root, the
+`orchestrator.llm_plan` generation, and the selected tool execution with its
+input, result, and final run output. The Langfuse trace carries the same trace
+ID as Tempo plus filterable request, tenant, agent, and workflow metadata.
+Gateway HTTP, JWT, polling, worker internals, database spans, and other
+infrastructure details remain only in Tempo, avoiding complete-trace
+duplication while preserving model, input, output, and usage analytics in
+Langfuse:
 
 ```bash
 LANGFUSE_ENABLED=true

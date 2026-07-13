@@ -23,6 +23,7 @@ from opentelemetry.trace import Link, SpanKind, Tracer
 TRACE_CONTEXT_FIELD = "trace_context"
 _DISABLED_ENV_VALUES = {"0", "false", "no", "off"}
 _CONFIGURED_SERVICES: set[str] = set()
+_LANGFUSE_PROVIDERS: dict[str, TracerProvider] = {}
 _HTTPX_INSTRUMENTED = False
 _ASYNCPG_INSTRUMENTED = False
 _LOGGING_INSTRUMENTED = False
@@ -121,7 +122,7 @@ def _resource(service_name: str) -> Resource:
 def setup_observability(service_name: str, app: Any | None = None) -> Tracer:
     global _ASYNCPG_INSTRUMENTED, _HTTPX_INSTRUMENTED, _LOGGING_INSTRUMENTED
 
-    if not (_otel_enabled() or _langfuse_configured()):
+    if not _otel_enabled():
         return trace.get_tracer(service_name)
 
     if service_name not in _CONFIGURED_SERVICES:
@@ -131,17 +132,6 @@ def setup_observability(service_name: str, app: Any | None = None) -> Tracer:
         if endpoint:
             provider.add_span_processor(
                 BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)),
-            )
-        langfuse_endpoint = _langfuse_traces_endpoint()
-        langfuse_headers = _langfuse_headers()
-        if langfuse_endpoint and langfuse_headers:
-            provider.add_span_processor(
-                BatchSpanProcessor(
-                    OTLPSpanExporter(
-                        endpoint=langfuse_endpoint,
-                        headers=langfuse_headers,
-                    ),
-                ),
             )
         trace.set_tracer_provider(provider)
 
@@ -177,14 +167,33 @@ def setup_observability(service_name: str, app: Any | None = None) -> Tracer:
     if not _LOGGING_INSTRUMENTED:
         LoggingInstrumentor().instrument(set_logging_format=True)
         logging.getLogger(__name__).info(
-            "OpenTelemetry configured for service=%s endpoint=%s langfuse=%s",
+            "OpenTelemetry configured for service=%s endpoint=%s",
             service_name,
             _traces_endpoint() or "none",
-            "enabled" if _langfuse_traces_endpoint() else "disabled",
         )
         _LOGGING_INSTRUMENTED = True
 
     return trace.get_tracer(service_name)
+
+
+def setup_langfuse_observability(service_name: str) -> Tracer:
+    """Create an isolated tracer for logical agent observations in Langfuse."""
+    endpoint = _langfuse_traces_endpoint()
+    headers = _langfuse_headers()
+    if not endpoint or not headers:
+        return trace.NoOpTracerProvider().get_tracer(f"{service_name}.langfuse")
+
+    provider = _LANGFUSE_PROVIDERS.get(service_name)
+    if provider is None:
+        provider = TracerProvider(resource=_resource(service_name))
+        provider.add_span_processor(
+            BatchSpanProcessor(
+                OTLPSpanExporter(endpoint=endpoint, headers=headers),
+            ),
+        )
+        _LANGFUSE_PROVIDERS[service_name] = provider
+
+    return provider.get_tracer(f"{service_name}.langfuse")
 
 
 def clean_attributes(attributes: Mapping[str, Any] | None) -> dict[str, Any]:
