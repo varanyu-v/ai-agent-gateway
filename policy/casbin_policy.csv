@@ -1,4 +1,8 @@
 # p, subject, tenant/domain, object, action
+p, role:world-analyst, *, agent:assistant, invoke
+p, role:procurement-analyst, *, agent:assistant, invoke
+p, role:source-auditor, *, agent:assistant, invoke
+p, role:data-admin, *, agent:assistant, invoke
 p, role:world-analyst, *, agent:world-agent, invoke
 p, role:world-analyst, *, datasource:world-db, read
 p, role:world-analyst, *, tool:sql, execute

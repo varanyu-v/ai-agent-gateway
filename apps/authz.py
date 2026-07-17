@@ -140,6 +140,14 @@ def can_read_data_source_subjects(
     return is_allowed_subjects(subjects, tenant_id, f"{DATA_SOURCE_PREFIX}{source_id}", READ)
 
 
+def can_invoke_agent_subjects(
+    subjects: Iterable[str],
+    tenant_id: str,
+    agent_id: str,
+) -> bool:
+    return is_allowed_subjects(subjects, tenant_id, f"{AGENT_PREFIX}{agent_id}", INVOKE)
+
+
 def allowed_agents(user: dict[str, Any]) -> list[str]:
     return sorted(
         agent_id

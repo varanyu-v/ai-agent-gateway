@@ -878,6 +878,7 @@
                 <div>
                   <label for="agentId">Agent</label>
                   <select id="agentId">
+                    <option value="assistant">assistant (auto-route)</option>
                     <option value="world-agent">world-agent</option>
                     <option value="procurement-agent">procurement-agent</option>
                   </select>
@@ -985,7 +986,7 @@
           label: "World analyst",
           username: "world-analyst",
           password: "world-password",
-          agent: "world-agent",
+          agent: "assistant",
           message: "show the largest cities by population with country context",
           roles: ["role:world-analyst"],
         },
@@ -993,7 +994,7 @@
           label: "Procurement analyst",
           username: "procurement-analyst",
           password: "procurement-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "rank suppliers by total purchase spend and risk",
           roles: ["role:procurement-analyst"],
         },
@@ -1001,7 +1002,7 @@
           label: "Source auditor",
           username: "source-auditor",
           password: "auditor-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "rank suppliers by total purchase spend and risk",
           roles: ["role:source-auditor"],
         },
@@ -1009,7 +1010,7 @@
           label: "Data admin",
           username: "data-admin",
           password: "data-admin-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "remove blocked supplier records from the procurement source",
           roles: ["role:data-admin"],
         },

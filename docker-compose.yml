@@ -382,6 +382,7 @@ services:
       AGENT_SERVICES: ${AGENT_SERVICES:-world-agent=http://world-agent:8004,procurement-agent=http://procurement-agent:8005}
       AGENT_CONNECT_TIMEOUT_SECONDS: ${AGENT_CONNECT_TIMEOUT_SECONDS:-5}
       AGENT_READ_TIMEOUT_SECONDS: ${AGENT_READ_TIMEOUT_SECONDS:-60}
+      ROUTER_AGENT_ID: ${ROUTER_AGENT_ID:-assistant}
     ports:
       - "8001:8001"
     depends_on:

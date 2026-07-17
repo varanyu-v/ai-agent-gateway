@@ -76,6 +76,35 @@ unreachable → `502`, agent 5xx → `502`, agent 4xx passes through.
 `GET /internal/agents` on the orchestrator lists the registered agents and
 their discovered cards.
 
+## Supervisor router (`assistant`)
+
+The orchestrator itself serves one virtual agent, the supervisor router
+(`ROUTER_AGENT_ID`, default `assistant`). It gives users a single place to
+ask anything:
+
+1. The message is classified by the LiteLLM planner against the live
+   registry — each registered agent's card description becomes a routing
+   candidate — with a deterministic keyword fallback when the LLM is not
+   configured or fails.
+2. General questions (anything outside the registered domains) are answered
+   directly by the orchestrator's LLM with no tool or database access; the
+   run completes immediately with the answer as its output.
+3. Domain questions are handed to the matching agent service through the
+   normal run path: same card discovery, same Casbin enforcement on the
+   decision, same Kafka events and tool-broker callbacks. Before delegating,
+   the router checks that the caller's policy subjects can invoke the routed
+   agent (`agent:<routed-id>` `invoke`); otherwise the run is denied with an
+   `agent_access_denied` audit event, so the router cannot widen access
+   beyond what direct invocation would allow.
+
+Routing is auditable (`assistant_route_selected` and
+`assistant_general_answered` on `audit.events`) and traced: the classifier
+and the direct answer are Langfuse generations under the run's `agent-run`
+root, and a delegated run stays one logical trace across services. Because
+candidates come from the registry, adding a new agent service to
+`AGENT_SERVICES` extends the router without code changes. Grant
+`agent:assistant` `invoke` in the Casbin policy to let a role use the router.
+
 ## Agent service contract
 
 Any agent service must implement three endpoints. The two shipped agents get

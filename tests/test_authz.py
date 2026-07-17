@@ -122,7 +122,7 @@ class AuthzPolicyTests(unittest.TestCase):
 
         self.assertEqual(
             authz.allowed_agents(current_user),
-            ["procurement-agent", "world-agent"],
+            ["assistant", "procurement-agent", "world-agent"],
         )
         self.assertEqual(authz.allowed_data_sources(current_user), ["world-db"])
         self.assertEqual(authz.allowed_tools(current_user), ["report", "sql"])
@@ -162,6 +162,18 @@ class AuthzPolicyTests(unittest.TestCase):
         self.assertEqual(
             authz.agent_access_rules(),
             [
+                {
+                    "id": "assistant",
+                    "role": "role:data-admin",
+                    "roles": [
+                        "role:data-admin",
+                        "role:procurement-analyst",
+                        "role:source-auditor",
+                        "role:world-analyst",
+                    ],
+                    "policyObject": "agent:assistant",
+                    "policyAction": "invoke",
+                },
                 {
                     "id": "procurement-agent",
                     "role": "role:data-admin",

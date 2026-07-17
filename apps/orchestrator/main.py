@@ -7,6 +7,11 @@ trusted execution point: it enforces Casbin source/tool policy on every agent
 decision, publishes Kafka events, tracks run state and approvals, and owns the
 logical Langfuse `agent-run` trace that agent services parent their planner
 generations to.
+
+The orchestrator also exposes a virtual supervisor agent (see
+apps/orchestrator/router.py): runs addressed to ROUTER_AGENT_ID are classified
+and either answered directly (general questions) or delegated to the matching
+registered agent, subject to the caller's Casbin agent-invoke policy.
 """
 
 import asyncio
@@ -27,6 +32,7 @@ from typing_extensions import TypedDict
 
 from apps.authz import (
     can_execute_tool,
+    can_invoke_agent_subjects,
     can_read_data_source_subjects,
     parse_policy_subjects as parse_casbin_subjects,
 )
@@ -52,6 +58,14 @@ from apps.orchestrator.registry import (
     AgentRegistry,
     AgentServiceError,
     RegisteredAgent,
+)
+from apps.orchestrator.router import (
+    GENERAL_ROUTE,
+    ROUTER_AGENT_ID,
+    ROUTER_WORKFLOW,
+    answer_general,
+    classify_route,
+    is_router_agent,
 )
 
 
@@ -156,6 +170,63 @@ def run_output_for_status(
     if status == "running":
         return "Agent accepted the request and is waiting for tool output."
     return "Agent request was received."
+
+
+def settle_router_run(
+    span: Span,
+    langfuse_span: Span,
+    state: AgentState,
+    *,
+    status: str,
+    output: str,
+    denied_reason: str | None = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, str | None]:
+    """Record the final state of a run the router settled without an agent."""
+    request_id = state["request_id"]
+    if status == "denied":
+        span.set_status(Status(StatusCode.ERROR, denied_reason))
+        record_span_error(langfuse_span, denied_reason or "Run denied")
+    span.set_attributes(
+        clean_attributes(
+            {"app.run_status": status, "app.denied_reason": denied_reason},
+        ),
+    )
+    langfuse_output = {
+        "status": status,
+        "agent_id": state["agent_id"],
+        "message": output,
+        "denied_reason": denied_reason,
+    }
+    langfuse_span.set_attributes(
+        clean_attributes(
+            {
+                "app.run_status": status,
+                "app.denied_reason": denied_reason,
+                "langfuse.observation.output": langfuse_json(langfuse_output),
+                "langfuse.observation.metadata.status": status,
+                "langfuse.trace.output": langfuse_json(langfuse_output),
+            },
+        ),
+    )
+    remember_run(
+        request_id,
+        {
+            "status": status,
+            "agent_id": state["agent_id"],
+            "denied_reason": denied_reason,
+            "result": result,
+            "output": output,
+        },
+    )
+    discard_langfuse_run_trace(request_id)
+    return {
+        "run_id": request_id,
+        "status": status,
+        "agent_id": state["agent_id"],
+        "denied_reason": denied_reason,
+        "output": output,
+    }
 
 
 @contextmanager
@@ -776,14 +847,17 @@ async def run(
         )
 
         agent = agent_registry.get(agent_id)
-        if agent is None:
+        if agent is None and not is_router_agent(agent_id):
             span.set_status(Status(StatusCode.ERROR, "Unknown agent_id"))
             raise HTTPException(
                 status_code=404,
-                detail=f"Unknown agent_id. Available agents: {agent_registry.agent_ids}",
+                detail=(
+                    "Unknown agent_id. Available agents: "
+                    f"{[ROUTER_AGENT_ID, *agent_registry.agent_ids]}"
+                ),
             )
 
-        workflow_name = agent.workflow
+        workflow_name = agent.workflow if agent is not None else ROUTER_WORKFLOW
         with langfuse_agent_trace(
             request_id=x_request_id,
             session_id=body.thread_id or x_request_id,
@@ -794,6 +868,104 @@ async def run(
             message=body.message,
         ) as langfuse_span:
             await publish("agent.requested", state)
+
+            if agent is None:
+                # Supervisor path: classify the message, then either answer it
+                # directly (general topics) or hand it to the matching
+                # registered agent through the normal policy-enforced flow.
+                candidates = [
+                    candidate
+                    for candidate_id in agent_registry.agent_ids
+                    if (candidate := agent_registry.get(candidate_id)) is not None
+                ]
+                route = await classify_route(
+                    body.message,
+                    candidates,
+                    span_child_context(langfuse_span),
+                )
+                route_attributes = clean_attributes(
+                    {
+                        "app.route.target": route.target,
+                        "app.route.source": route.source,
+                    },
+                )
+                span.set_attributes(route_attributes)
+                langfuse_span.set_attributes(route_attributes)
+                await publish(
+                    "audit.events",
+                    {
+                        **state,
+                        "workflow": ROUTER_WORKFLOW,
+                        "event": "assistant_route_selected",
+                        "route": route.target,
+                        "route_source": route.source,
+                    },
+                )
+
+                if route.target == GENERAL_ROUTE:
+                    answer = await answer_general(
+                        body.message,
+                        span_child_context(langfuse_span),
+                    )
+                    await publish(
+                        "audit.events",
+                        {
+                            **state,
+                            "workflow": ROUTER_WORKFLOW,
+                            "event": "assistant_general_answered",
+                            "answer_source": answer.source,
+                        },
+                    )
+                    return settle_router_run(
+                        span,
+                        langfuse_span,
+                        state,
+                        status="completed",
+                        output=answer.text,
+                        result={
+                            "route": GENERAL_ROUTE,
+                            "answer_source": answer.source,
+                        },
+                    )
+
+                agent = agent_registry.get(route.target)
+                if agent is None or not can_invoke_agent_subjects(
+                    state["policy_subjects"],
+                    x_tenant_id,
+                    route.target,
+                ):
+                    denied_reason = f"User cannot access agent: {route.target}"
+                    await publish(
+                        "audit.events",
+                        {
+                            **state,
+                            "workflow": ROUTER_WORKFLOW,
+                            "event": "agent_access_denied",
+                            "route": route.target,
+                            "reason": denied_reason,
+                        },
+                    )
+                    return settle_router_run(
+                        span,
+                        langfuse_span,
+                        state,
+                        status="denied",
+                        output=run_output_for_status(
+                            "denied",
+                            denied_reason=denied_reason,
+                        ),
+                        denied_reason=denied_reason,
+                    )
+
+                # The run now belongs to the routed agent: tool-broker
+                # callbacks authenticate against the run's agent_id.
+                workflow_name = agent.workflow
+                state["agent_id"] = agent.agent_id
+                remember_run(
+                    x_request_id,
+                    {"agent_id": agent.agent_id, "routed_from": ROUTER_AGENT_ID},
+                )
+
             try:
                 decision = await invoke_agent_service(
                     agent,
@@ -806,7 +978,7 @@ async def run(
                     x_request_id,
                     {
                         "status": "failed",
-                        "agent_id": agent_id,
+                        "agent_id": state["agent_id"],
                         "denied_reason": None,
                         "output": error.detail,
                     },
@@ -841,7 +1013,7 @@ async def run(
 
             langfuse_output = {
                 "status": status,
-                "agent_id": agent_id,
+                "agent_id": state["agent_id"],
                 "message": output,
                 "denied_reason": denied_reason,
             }
@@ -861,7 +1033,7 @@ async def run(
                 x_request_id,
                 {
                     "status": status,
-                    "agent_id": agent_id,
+                    "agent_id": state["agent_id"],
                     "denied_reason": denied_reason,
                     "output": output,
                 },
@@ -873,7 +1045,7 @@ async def run(
             return {
                 "run_id": x_request_id,
                 "status": status,
-                "agent_id": agent_id,
+                "agent_id": state["agent_id"],
                 "denied_reason": denied_reason,
             }
 
