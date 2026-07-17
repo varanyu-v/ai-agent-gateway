@@ -103,7 +103,7 @@ flowchart TD
     end
 
     subgraph agents["Agent services (one service per agent)"]
-        world_agent["world-agent :8004<br/>LangGraph + LiteLLM planner<br/>actions: sql, report, approval<br/>requires: world-db"]
+        world_agent["world-agent :8004<br/>LangGraph + LiteLLM planner<br/>actions: sql, report, brief, approval<br/>requires: world-db"]
         procurement_agent["procurement-agent :8005<br/>LangGraph + LiteLLM planner<br/>actions: sql, approval<br/>requires: procurement-db"]
     end
 
@@ -146,7 +146,8 @@ flowchart TD
     allowed_permissions -->|"Casbin subjects + source context"| orchestrator
     orchestrator -->|"POST /runs (agent card discovery)"| world_agent
     orchestrator -->|"POST /runs (agent card discovery)"| procurement_agent
-    world_agent -->|"decision: tool/approval"| orchestrator
+    world_agent -->|"decision: tool/approval/async"| orchestrator
+    world_agent -.->|"tool-broker callbacks (async runs)"| orchestrator
     procurement_agent -->|"decision: tool/approval"| orchestrator
     orchestrator -->|"missing permission/tool"| denied
     orchestrator -->|"Tool request events"| kafka
@@ -270,7 +271,10 @@ orchestrator.
 
 Workflow behavior:
 
-- `world-agent` (own service, port 8004) can plan `sql`, `report`, or `approval`.
+- `world-agent` (own service, port 8004) can plan `sql`, `report`, `brief`, or
+  `approval`. A `brief` becomes an async run: the agent drives a multi-step
+  workflow (SQL, then a report) through the orchestrator's tool-broker
+  callback API, with every step policy-checked (see `docs/agent-services.md`).
 - `procurement-agent` (own service, port 8005) can plan `sql` or `approval`.
 - Each agent service plans with LiteLLM when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
 - Deterministic fallback routing is used when LiteLLM is not configured or the model call fails.

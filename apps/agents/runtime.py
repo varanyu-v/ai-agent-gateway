@@ -12,16 +12,24 @@ can integrate any number of agents without code changes:
   compromised agent cannot widen data access.
 - `GET /health` — liveness.
 
+Long-running agents can return `action="async"` and then drive the run
+themselves through the orchestrator's tool-broker callback API using
+ToolBrokerClient: request tools, poll their results, and report the final
+outcome. Every requested tool is still Casbin-checked by the orchestrator
+against the policy subjects minted for the original request, so the callback
+path grants no more access than the decision path.
+
 The LiteLLM planner and its Langfuse generation span live here; the span is
 parented to the orchestrator's `agent-run` root through the
 `x-langfuse-traceparent` header so one logical Langfuse trace spans services.
 """
 
+import asyncio
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Literal
 
 import httpx
 from fastapi import FastAPI, Header
@@ -57,6 +65,18 @@ LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
 LITELLM_MODEL = os.getenv("LITELLM_MODEL", "")
 LITELLM_TIMEOUT_SECONDS = float(os.getenv("LITELLM_TIMEOUT_SECONDS", "30"))
 
+# Tool-broker callback API (async runs). Agents call back into the
+# orchestrator to request tools, poll results, and report the final outcome.
+ORCHESTRATOR_CALLBACK_URL = os.getenv(
+    "ORCHESTRATOR_CALLBACK_URL",
+    os.getenv("ORCH_URL", "http://localhost:8001"),
+).rstrip("/")
+AGENT_CALLBACK_TOKEN = os.getenv("AGENT_CALLBACK_TOKEN", "")
+TOOL_BROKER_POLL_INTERVAL_SECONDS = float(
+    os.getenv("TOOL_BROKER_POLL_INTERVAL_SECONDS", "0.5"),
+)
+TOOL_BROKER_TIMEOUT_SECONDS = float(os.getenv("TOOL_BROKER_TIMEOUT_SECONDS", "120"))
+
 LLM_PLANNER_SYSTEM_PROMPT = """
 You route enterprise agent requests to one workflow action.
 Return only a JSON object with this shape:
@@ -86,7 +106,7 @@ class AgentRunRequest(BaseModel):
 class AgentDecision(BaseModel):
     """What the agent wants to happen; the orchestrator enforces and executes."""
 
-    action: Literal["tool", "approval", "deny"]
+    action: Literal["tool", "approval", "deny", "async"]
     workflow: str
     planner_action: str
     planner_source: str = "fallback"
@@ -95,6 +115,151 @@ class AgentDecision(BaseModel):
     required_permission: str | None = None
     audit_event: str | None = None
     reason: str | None = None
+
+
+class ToolBrokerError(RuntimeError):
+    """A tool-broker callback was rejected or a tool run did not succeed."""
+
+    def __init__(self, detail: str, status_code: int | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
+class ToolBrokerClient:
+    """Agent-side client for the orchestrator's tool-broker callback API.
+
+    Long-running agents use this to execute tools mid-run: every request goes
+    back through the orchestrator, which enforces Casbin policy and publishes
+    `tool.requested`, so agents still hold no Kafka or database access.
+    """
+
+    def __init__(
+        self,
+        agent_id: str,
+        run_id: str,
+        *,
+        base_url: str | None = None,
+        callback_token: str | None = None,
+        poll_interval_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.run_id = run_id
+        self.base_url = (base_url or ORCHESTRATOR_CALLBACK_URL).rstrip("/")
+        self.callback_token = (
+            AGENT_CALLBACK_TOKEN if callback_token is None else callback_token
+        )
+        self.poll_interval_seconds = (
+            TOOL_BROKER_POLL_INTERVAL_SECONDS
+            if poll_interval_seconds is None
+            else poll_interval_seconds
+        )
+        self.timeout_seconds = (
+            TOOL_BROKER_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        )
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=30,
+            transport=transport,
+        )
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def __aenter__(self) -> "ToolBrokerClient":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.aclose()
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"x-agent-id": self.agent_id}
+        if self.callback_token:
+            headers["x-callback-token"] = self.callback_token
+        return headers
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        try:
+            response = await self._client.request(
+                method,
+                path,
+                headers=self._headers(),
+                **kwargs,
+            )
+        except httpx.HTTPError as exc:
+            raise ToolBrokerError(f"Tool broker is unreachable: {exc}") from exc
+        if response.status_code >= 400:
+            detail = f"Tool broker rejected the request ({response.status_code})"
+            try:
+                detail = str(response.json().get("detail") or detail)
+            except ValueError:
+                pass
+            raise ToolBrokerError(detail, status_code=response.status_code)
+        return response.json()
+
+    async def request_tool(
+        self,
+        tool: str,
+        tool_input: dict[str, Any] | None = None,
+        required_permission: str | None = None,
+    ) -> str:
+        """Ask the orchestrator to execute a tool; returns the tool_call_id."""
+        body = await self._request(
+            "POST",
+            f"/internal/runs/{self.run_id}/tool-calls",
+            json={
+                "tool": tool,
+                "tool_input": tool_input or {},
+                "required_permission": required_permission,
+            },
+        )
+        return str(body["tool_call_id"])
+
+    async def wait_for_tool(self, tool_call_id: str) -> dict[str, Any]:
+        """Poll a tool call until it settles; returns the final record."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.timeout_seconds
+        while True:
+            record = await self._request(
+                "GET",
+                f"/internal/runs/{self.run_id}/tool-calls/{tool_call_id}",
+            )
+            if record.get("status") != "requested":
+                return record
+            if loop.time() >= deadline:
+                raise ToolBrokerError(f"Tool call timed out: {tool_call_id}")
+            await asyncio.sleep(self.poll_interval_seconds)
+
+    async def run_tool(
+        self,
+        tool: str,
+        tool_input: dict[str, Any] | None = None,
+        required_permission: str | None = None,
+    ) -> dict[str, Any]:
+        """Request a tool and wait for it; raises ToolBrokerError on failure."""
+        tool_call_id = await self.request_tool(tool, tool_input, required_permission)
+        record = await self.wait_for_tool(tool_call_id)
+        if record.get("status") != "completed":
+            raise ToolBrokerError(
+                record.get("denied_reason")
+                or record.get("output")
+                or f"Tool '{tool}' failed",
+            )
+        return record
+
+    async def complete_run(
+        self,
+        status: str = "completed",
+        output: str | None = None,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        await self._request(
+            "POST",
+            f"/internal/runs/{self.run_id}/complete",
+            json={"status": status, "output": output, "result": result},
+        )
 
 
 @dataclass(frozen=True)
@@ -109,6 +274,12 @@ class AgentDefinition:
     tools: tuple[str, ...]
     fallback_action: Callable[[str], str]
     decide: Callable[[str, AgentRunRequest], AgentDecision]
+    # Driver for decisions with action="async": receives the run request and a
+    # ToolBrokerClient, returns the final run output. The runtime schedules it
+    # in the background and reports completion/failure to the orchestrator.
+    run_async: Callable[[AgentRunRequest, ToolBrokerClient], Awaitable[str]] | None = (
+        field(default=None)
+    )
 
 
 class AgentState(TypedDict):
@@ -396,6 +567,36 @@ def build_workflow(
     )
 
 
+async def drive_background_run(
+    definition: AgentDefinition,
+    request: AgentRunRequest,
+) -> None:
+    """Run an async agent workflow and always report the outcome back."""
+    if definition.run_async is None:
+        return
+    async with ToolBrokerClient(request.agent_id, request.request_id) as broker:
+        try:
+            output = await definition.run_async(request, broker)
+        except Exception as exc:  # noqa: BLE001 - the run must settle either way
+            detail = exc.detail if isinstance(exc, ToolBrokerError) else str(exc)
+            try:
+                await broker.complete_run("failed", detail)
+            except ToolBrokerError:
+                pass
+        else:
+            await broker.complete_run("completed", output)
+
+
+_BACKGROUND_RUNS: set[asyncio.Task[None]] = set()
+
+
+def start_background_run(definition: AgentDefinition, request: AgentRunRequest) -> None:
+    """Schedule the async driver; kept as a seam so tests can intercept it."""
+    task = asyncio.create_task(drive_background_run(definition, request))
+    _BACKGROUND_RUNS.add(task)
+    task.add_done_callback(_BACKGROUND_RUNS.discard)
+
+
 def create_agent_app(definition: AgentDefinition) -> FastAPI:
     app = FastAPI(title=definition.name)
     tracer = setup_observability(definition.agent_id, app)
@@ -431,12 +632,15 @@ def create_agent_app(definition: AgentDefinition) -> FastAPI:
             state,
             {"configurable": {"thread_id": body.thread_id or body.request_id}},
         )
+        decision = result["decision"]
+        if decision.get("action") == "async" and definition.run_async is not None:
+            start_background_run(definition, body)
         return {
             "protocol": AGENT_PROTOCOL,
             "agent_id": definition.agent_id,
             "request_id": body.request_id,
             "workflow": definition.workflow,
-            "decision": result["decision"],
+            "decision": decision,
         }
 
     return app

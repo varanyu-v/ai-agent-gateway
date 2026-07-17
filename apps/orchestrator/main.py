@@ -59,6 +59,9 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 AGENT_SERVICES = os.getenv("AGENT_SERVICES", DEFAULT_AGENT_SERVICES)
 AGENT_CONNECT_TIMEOUT_SECONDS = float(os.getenv("AGENT_CONNECT_TIMEOUT_SECONDS", "5"))
 AGENT_READ_TIMEOUT_SECONDS = float(os.getenv("AGENT_READ_TIMEOUT_SECONDS", "60"))
+# Shared secret agents must present on tool-broker callbacks. Empty disables
+# the check (network trust only), matching the header-trust model elsewhere.
+AGENT_CALLBACK_TOKEN = os.getenv("AGENT_CALLBACK_TOKEN", "")
 
 
 class AgentState(TypedDict):
@@ -76,6 +79,22 @@ class AgentState(TypedDict):
 class RunIn(BaseModel):
     message: str
     thread_id: str | None = None
+
+
+class ToolCallIn(BaseModel):
+    """A tool execution an agent requests mid-run through the tool broker."""
+
+    tool: str
+    tool_input: dict[str, Any] | None = None
+    required_permission: str | None = None
+
+
+class RunCompleteIn(BaseModel):
+    """Final outcome an agent reports for a callback-mode run."""
+
+    status: str = "completed"
+    output: str | None = None
+    result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -254,7 +273,12 @@ def fail_langfuse_tool_trace(tool_call_id: str, exc: BaseException | str) -> Non
     tool_trace.span.end()
 
 
-def finish_langfuse_tool_trace(event: dict[str, Any], output: str) -> None:
+def finish_langfuse_tool_trace(
+    event: dict[str, Any],
+    output: str,
+    *,
+    end_run_trace: bool = True,
+) -> None:
     request_id = str(event.get("request_id") or "")
     tool_call_id = str(event.get("tool_call_id") or "")
     run_trace = LANGFUSE_RUN_TRACES.get(request_id)
@@ -289,7 +313,8 @@ def finish_langfuse_tool_trace(event: dict[str, Any], output: str) -> None:
     if status == "failed":
         record_span_error(span, "Tool execution failed")
     span.end()
-    LANGFUSE_RUN_TRACES.pop(request_id, None)
+    if end_run_trace:
+        LANGFUSE_RUN_TRACES.pop(request_id, None)
 
 
 def discard_langfuse_run_trace(request_id: str, reason: str | None = None) -> None:
@@ -310,59 +335,88 @@ def close_pending_langfuse_traces() -> None:
         fail_langfuse_tool_trace(tool_call_id, "Orchestrator shutting down")
 
 
-async def consume_tool_completed() -> None:
-    if completed_consumer is None:
+def record_tool_call(run_id: str, tool_call_id: str, payload: dict[str, Any]) -> None:
+    run_record = RUNS.setdefault(run_id, {})
+    tool_calls = run_record.setdefault("tool_calls", {})
+    tool_calls[tool_call_id] = {**tool_calls.get(tool_call_id, {}), **payload}
+
+
+def handle_tool_completed_event(event: dict[str, Any]) -> None:
+    request_id = event.get("request_id")
+    if not request_id:
         return
 
-    async for msg in completed_consumer:
-        event = decode_event(msg.value)
-        request_id = event.get("request_id")
-        if not request_id:
-            continue
+    with start_event_span(
+        tracer,
+        "orchestrator.tool_completed",
+        event,
+        attributes={
+            "app.request_id": request_id,
+            "app.agent_id": event.get("agent_id"),
+            "app.workflow": event.get("workflow"),
+            "app.tool": event.get("tool"),
+            "app.tool_call_id": event.get("tool_call_id"),
+            "app.run_status": event.get("status", "completed"),
+            "messaging.system": "kafka",
+            "messaging.destination.name": "tool.completed",
+        },
+    ) as span:
+        if event.get("status") == "failed":
+            span.set_status(Status(StatusCode.ERROR, "Tool execution failed"))
 
-        with start_event_span(
-            tracer,
-            "orchestrator.tool_completed",
-            event,
-            attributes={
-                "app.request_id": request_id,
-                "app.agent_id": event.get("agent_id"),
-                "app.workflow": event.get("workflow"),
-                "app.tool": event.get("tool"),
-                "app.tool_call_id": event.get("tool_call_id"),
-                "app.run_status": event.get("status", "completed"),
-                "messaging.system": "kafka",
-                "messaging.destination.name": "tool.completed",
-            },
-        ) as span:
-            if event.get("status") == "failed":
-                span.set_status(Status(StatusCode.ERROR, "Tool execution failed"))
+        output = run_output_for_status(
+            event.get("status", "completed"),
+            tool=event.get("tool"),
+            result=event.get("result"),
+            denied_reason=event.get("denied_reason"),
+        )
 
-            output = run_output_for_status(
-                event.get("status", "completed"),
-                tool=event.get("tool"),
-                result=event.get("result"),
-                denied_reason=event.get("denied_reason"),
-            )
-            finish_langfuse_tool_trace(event, output)
-            remember_run(
+        if RUNS.get(request_id, {}).get("mode") == "callback":
+            # Callback-mode runs stay "running" until the agent reports the
+            # final outcome; a tool completion only settles that one call.
+            finish_langfuse_tool_trace(event, output, end_run_trace=False)
+            record_tool_call(
                 request_id,
+                str(event.get("tool_call_id") or ""),
                 {
-                    "run_id": request_id,
-                    "request_id": request_id,
-                    "status": event.get("status", "completed"),
-                    "agent_id": event.get("agent_id"),
-                    "tenant_id": event.get("tenant_id"),
-                    "user_id": event.get("user_id"),
-                    "workflow": event.get("workflow"),
-                    "tool": event.get("tool"),
                     "tool_call_id": event.get("tool_call_id"),
+                    "tool": event.get("tool"),
+                    "status": event.get("status", "completed"),
                     "input": event.get("input"),
                     "result": event.get("result"),
                     "denied_reason": event.get("denied_reason"),
                     "output": output,
                 },
             )
+            return
+
+        finish_langfuse_tool_trace(event, output)
+        remember_run(
+            request_id,
+            {
+                "run_id": request_id,
+                "request_id": request_id,
+                "status": event.get("status", "completed"),
+                "agent_id": event.get("agent_id"),
+                "tenant_id": event.get("tenant_id"),
+                "user_id": event.get("user_id"),
+                "workflow": event.get("workflow"),
+                "tool": event.get("tool"),
+                "tool_call_id": event.get("tool_call_id"),
+                "input": event.get("input"),
+                "result": event.get("result"),
+                "denied_reason": event.get("denied_reason"),
+                "output": output,
+            },
+        )
+
+
+async def consume_tool_completed() -> None:
+    if completed_consumer is None:
+        return
+
+    async for msg in completed_consumer:
+        handle_tool_completed_event(decode_event(msg.value))
 
 
 async def publish(topic: str, payload: dict[str, Any]) -> None:
@@ -577,6 +631,32 @@ async def apply_agent_decision(
             "needs_approval": False,
             "denied_reason": decision.get("reason") or "Agent denied the request",
         }
+
+    if action == "async":
+        # The agent will drive this run itself through the tool-broker
+        # callback API; every tool it requests is policy-checked there. Keep
+        # the policy subjects from the original trusted request so callbacks
+        # are enforced against what the gateway minted, not what the agent
+        # sends later.
+        remember_run(
+            state["request_id"],
+            {
+                "mode": "callback",
+                "workflow": workflow,
+                "policy_subjects": state["policy_subjects"],
+                "tool_calls": {},
+                "tool_call_seq": 0,
+            },
+        )
+        await publish(
+            "audit.events",
+            {
+                **state,
+                "workflow": workflow,
+                "event": decision.get("audit_event") or "agent_callback_run_accepted",
+            },
+        )
+        return {"needs_approval": False, "denied_reason": None}
 
     if action == "tool":
         tool = str(decision.get("tool") or "")
@@ -857,6 +937,185 @@ async def get_run(
             ),
         )
         return run_result
+
+
+def require_callback_run(
+    run_id: str,
+    agent_id: str,
+    callback_token: str,
+) -> dict[str, Any]:
+    """Authorize a tool-broker callback and return the owning run record.
+
+    Policy context always comes from the stored run (minted by the gateway at
+    request time), never from the callback itself, so an agent cannot widen
+    its access by sending different subjects later.
+    """
+    if AGENT_CALLBACK_TOKEN and callback_token != AGENT_CALLBACK_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid callback token")
+
+    run_record = RUNS.get(run_id)
+    if run_record is None or run_record.get("agent_id") != agent_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    if run_record.get("mode") != "callback":
+        raise HTTPException(
+            status_code=409,
+            detail="Run does not accept tool-broker callbacks",
+        )
+    return run_record
+
+
+def callback_state_from_run(run_record: dict[str, Any]) -> AgentState:
+    return {
+        "request_id": run_record["run_id"],
+        "tenant_id": run_record.get("tenant_id") or "",
+        "user_id": run_record.get("user_id") or "",
+        "agent_id": run_record.get("agent_id") or "",
+        "message": run_record.get("message") or "",
+        "allowed_permissions": run_record.get("allowed_permissions") or [],
+        "policy_subjects": run_record.get("policy_subjects") or [],
+        "needs_approval": False,
+        "denied_reason": None,
+    }
+
+
+@app.post("/internal/runs/{run_id}/tool-calls")
+async def request_tool_call(
+    run_id: str,
+    body: ToolCallIn,
+    x_agent_id: str = Header(),
+    x_callback_token: str = Header(default=""),
+) -> dict[str, Any]:
+    with tracer.start_as_current_span(
+        "orchestrator.tool_call_requested",
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                "app.run_id": run_id,
+                "app.agent_id": x_agent_id,
+                "app.tool": body.tool,
+            },
+        ),
+    ) as span:
+        run_record = require_callback_run(run_id, x_agent_id, x_callback_token)
+        if run_record.get("status") != "running":
+            span.set_status(Status(StatusCode.ERROR, "Run is not active"))
+            raise HTTPException(status_code=409, detail="Run is not active")
+
+        state = callback_state_from_run(run_record)
+        workflow = str(run_record.get("workflow") or "")
+        tool = body.tool.strip()
+
+        if body.required_permission and not can_use_permission(
+            state,
+            body.required_permission,
+        ):
+            denial = await deny_permission_access(
+                state,
+                workflow,
+                body.required_permission,
+            )
+            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            raise HTTPException(status_code=403, detail=denial["denied_reason"])
+        if not tool or not can_use_tool(state, tool):
+            denial = await deny_tool_access(state, workflow, tool or "unknown")
+            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            raise HTTPException(status_code=403, detail=denial["denied_reason"])
+
+        sequence = int(run_record.get("tool_call_seq") or 0) + 1
+        run_record["tool_call_seq"] = sequence
+        tool_call_id = f"{run_id}:{tool}:{sequence}"
+        record_tool_call(
+            run_id,
+            tool_call_id,
+            {
+                "tool_call_id": tool_call_id,
+                "tool": tool,
+                "status": "requested",
+                "input": body.tool_input or {},
+                "result": None,
+                "denied_reason": None,
+                "output": None,
+            },
+        )
+        await publish(
+            "tool.requested",
+            {
+                **state,
+                "tool": tool,
+                "tool_call_id": tool_call_id,
+                "workflow": workflow,
+                "input": body.tool_input or {},
+            },
+        )
+        span.set_attribute("app.tool_call_id", tool_call_id)
+        return {"run_id": run_id, "tool_call_id": tool_call_id, "status": "requested"}
+
+
+@app.get("/internal/runs/{run_id}/tool-calls/{tool_call_id}")
+async def get_tool_call(
+    run_id: str,
+    tool_call_id: str,
+    x_agent_id: str = Header(),
+    x_callback_token: str = Header(default=""),
+) -> dict[str, Any]:
+    run_record = require_callback_run(run_id, x_agent_id, x_callback_token)
+    tool_call = run_record.get("tool_calls", {}).get(tool_call_id)
+    if tool_call is None:
+        raise HTTPException(status_code=404, detail="Tool call not found")
+    return tool_call
+
+
+@app.post("/internal/runs/{run_id}/complete")
+async def complete_run(
+    run_id: str,
+    body: RunCompleteIn,
+    x_agent_id: str = Header(),
+    x_callback_token: str = Header(default=""),
+) -> dict[str, Any]:
+    with tracer.start_as_current_span(
+        "orchestrator.callback_run_completed",
+        kind=SpanKind.INTERNAL,
+        attributes=clean_attributes(
+            {
+                "app.run_id": run_id,
+                "app.agent_id": x_agent_id,
+                "app.run_status": body.status,
+            },
+        ),
+    ) as span:
+        run_record = require_callback_run(run_id, x_agent_id, x_callback_token)
+        if run_record.get("status") != "running":
+            span.set_status(Status(StatusCode.ERROR, "Run is not active"))
+            raise HTTPException(status_code=409, detail="Run is not active")
+
+        status = body.status if body.status in {"completed", "failed"} else "failed"
+        output = body.output or run_output_for_status(status)
+        remember_run(
+            run_id,
+            {
+                "status": status,
+                "result": body.result,
+                "output": output,
+            },
+        )
+        await publish(
+            "audit.events",
+            {
+                "request_id": run_id,
+                "tenant_id": run_record.get("tenant_id"),
+                "user_id": run_record.get("user_id"),
+                "agent_id": run_record.get("agent_id"),
+                "workflow": run_record.get("workflow"),
+                "event": f"agent_callback_run_{status}",
+            },
+        )
+        if status == "failed":
+            span.set_status(Status(StatusCode.ERROR, output))
+            discard_langfuse_run_trace(run_id, output)
+        else:
+            discard_langfuse_run_trace(run_id)
+        return RUNS[run_id]
 
 
 @app.post("/internal/runs/{run_id}/approve")

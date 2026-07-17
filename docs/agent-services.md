@@ -24,11 +24,12 @@ platform. The gateway design is covered separately in `docs/gateway-design.md`.
 
 ```mermaid
 flowchart LR
-    gateway["Gateway"] -->|"/internal/agents/{id}/runs"| orchestrator["Orchestrator<br/>agent registry<br/>Casbin enforcement<br/>run state + approvals"]
+    gateway["Gateway"] -->|"/internal/agents/{id}/runs"| orchestrator["Orchestrator<br/>agent registry<br/>Casbin enforcement<br/>run state + approvals<br/>tool broker"]
     orchestrator -->|"POST /runs"| world["world-agent service<br/>:8004"]
     orchestrator -->|"POST /runs"| procurement["procurement-agent service<br/>:8005"]
     world -->|"AgentDecision"| orchestrator
     procurement -->|"AgentDecision"| orchestrator
+    world -.->|"tool-broker callbacks<br/>(async runs)"| orchestrator
     orchestrator -->|"tool.requested / audit.events"| kafka["Kafka"]
     kafka --> workers["Tool workers<br/>route by database"]
     workers -->|"POST /query"| worldplane["world-db-access :8006<br/>world credentials only"]
@@ -51,8 +52,9 @@ The run lifecycle:
 4. The agent plans (LiteLLM planner with deterministic fallback) and returns
    an `AgentDecision` — it performs no side effects.
 5. The orchestrator enforces Casbin policy on the decision, then either
-   publishes `tool.requested`, records `requires_approval`, or denies with an
-   audit event.
+   publishes `tool.requested`, records `requires_approval`, denies with an
+   audit event, or — for `async` decisions — leaves the run `running` while
+   the agent drives it through the tool-broker callback API.
 6. For a SQL tool, the worker routes `POST /query` to the data plane that owns
    the requested database (via `DATA_PLANES`); that plane runs the final SQL
    guard against its own database. Tool completion flows back through Kafka.
@@ -147,10 +149,66 @@ Response — the decision the orchestrator will enforce and execute:
 - `approval`: park the run as `requires_approval` and publish the
   `audit_event` (e.g. `human_approval_required`).
 - `deny`: refuse the run with `reason`.
+- `async`: accept the run and drive it in the background through the
+  tool-broker callback API (below). The run stays `running` until the agent
+  reports its final outcome.
 
 ### `GET /health`
 
 Liveness for compose/orchestration health checks.
+
+## Tool-broker callback API (long-running agents)
+
+A single decision per run is too small a contract for complex, multi-step
+workflows. Agents that return `action="async"` drive the run themselves by
+calling back into the orchestrator's tool broker. The security model is
+unchanged: **every** callback tool request passes the same Casbin checks as
+the decision path, evaluated against the policy subjects the gateway minted
+when the run was created — never against anything the agent sends later. The
+agent still holds no Kafka or database access.
+
+All callback endpoints require `x-agent-id` (must match the agent that owns
+the run) and, when `AGENT_CALLBACK_TOKEN` is configured on the orchestrator,
+an `x-callback-token` shared secret.
+
+### `POST /internal/runs/{run_id}/tool-calls`
+
+Request a tool execution mid-run:
+
+```json
+{"tool": "sql", "tool_input": {"database": "world", "sql": "select ..."}, "required_permission": "world-db"}
+```
+
+The orchestrator enforces Casbin, mints `tool_call_id`
+(`{run_id}:{tool}:{sequence}`), records the call, and publishes
+`tool.requested`. Responds `{"run_id", "tool_call_id", "status": "requested"}`;
+a failed policy check responds `403` and emits the usual
+`permission_access_denied` / `tool_access_denied` audit event (the run stays
+`running` — the agent chooses how to proceed).
+
+### `GET /internal/runs/{run_id}/tool-calls/{tool_call_id}`
+
+Poll one tool call. Returns its record (`status` is `requested`, `completed`,
+or `failed`, plus `result` once settled). Tool completions consumed from
+`tool.completed` settle the matching call without ending the run.
+
+### `POST /internal/runs/{run_id}/complete`
+
+Report the final outcome: `{"status": "completed"|"failed", "output": "...",
+"result": {...}}`. This settles the run for gateway status polling, publishes
+an `agent_callback_run_completed` / `agent_callback_run_failed` audit event,
+and closes the Langfuse run trace.
+
+### Agent-side helper
+
+Python agents get `ToolBrokerClient` from `apps/agents/runtime.py`
+(`request_tool`, `wait_for_tool`, `run_tool`, `complete_run`) plus the
+`run_async` hook on `AgentDefinition`: return `action="async"` from `decide`
+and the runtime schedules `run_async(request, broker)` in the background,
+reporting completion or failure automatically. The world agent's "market
+brief" flow (SQL lookup, then a report built from its rows) is the reference
+implementation. Configure the callback target with `ORCHESTRATOR_CALLBACK_URL`
+(defaults to `ORCH_URL`).
 
 ## Per-agent data planes
 
@@ -210,7 +268,8 @@ source may be read; the data plane guarantees *how* it is read.
 ## Adding a new agent (checklist)
 
 1. Create `apps/agents/<name>/main.py` with an `AgentDefinition` (identity,
-   workflow, `actions`, `fallback_action`, `decide`) and
+   workflow, `actions`, `fallback_action`, `decide`, and optionally
+   `run_async` for long-running callback-driven workflows) and
    `app = create_agent_app(DEFINITION)` — or implement the contract above in
    any stack.
 2. Add a compose service running it on its own port with a `/health` check.
@@ -235,6 +294,11 @@ source may be read; the data plane guarantees *how* it is read.
 - Agent services listen on the internal network only; nothing but the
   orchestrator should reach them, and they hold no Kafka or database
   credentials.
+- Tool-broker callbacks are authenticated by `x-agent-id` plus the optional
+  `AGENT_CALLBACK_TOKEN` shared secret. In production, replace the shared
+  secret with per-agent credentials or mTLS so one team's agent cannot
+  impersonate another's; run state (including callback tool calls) is
+  in-memory and should move to a durable store.
 - Data planes also listen on the internal network only; only the SQL worker
   should reach them. Each holds credentials for a single database, so database
   credentials no longer live in the shared app environment — they are scoped to

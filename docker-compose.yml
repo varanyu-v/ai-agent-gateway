@@ -13,6 +13,7 @@ x-app-env: &app-env
   KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-agent-frontend}
   KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/ptvn/protocol/openid-connect/certs}
   ORCH_URL: http://orchestrator:8001
+  AGENT_CALLBACK_TOKEN: ${AGENT_CALLBACK_TOKEN:-}
   KAFKA_BOOTSTRAP: kafka:9092
   LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
   LITELLM_MODEL: ${LITELLM_MODEL:-}
