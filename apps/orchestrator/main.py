@@ -1,3 +1,14 @@
+"""Agent orchestrator: routes runs to external agent services and executes
+their decisions.
+
+Agents are separate HTTP services discovered through the AgentRegistry
+(AGENT_SERVICES env var + agent cards). The orchestrator stays the single
+trusted execution point: it enforces Casbin source/tool policy on every agent
+decision, publishes Kafka events, tracks run state and approvals, and owns the
+logical Langfuse `agent-run` trace that agent services parent their planner
+generations to.
+"""
+
 import asyncio
 import json
 import os
@@ -5,16 +16,12 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from fastapi import FastAPI, Header, HTTPException
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import END, StateGraph
-from langgraph.store.memory import InMemoryStore
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 from opentelemetry.context import Context
-from opentelemetry.trace import NonRecordingSpan, Span, SpanKind, Status, StatusCode
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 from pydantic import BaseModel
 from typing_extensions import TypedDict
 
@@ -23,6 +30,16 @@ from apps.authz import (
     can_read_data_source_subjects,
     parse_policy_subjects as parse_casbin_subjects,
 )
+from apps.langfuse_utils import (
+    LANGFUSE_PARENT_HEADER,
+    build_trace_attributes,
+    langfuse_json,
+    langfuse_payload,
+    record_span_error,
+    span_child_context,
+    trace_id_hex,
+    traceparent_value,
+)
 from apps.observability import (
     clean_attributes,
     inject_trace_context,
@@ -30,35 +47,18 @@ from apps.observability import (
     setup_observability,
     start_event_span,
 )
+from apps.orchestrator.registry import (
+    DEFAULT_AGENT_SERVICES,
+    AgentRegistry,
+    AgentServiceError,
+    RegisteredAgent,
+)
 
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
-LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000/v1").rstrip("/")
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "")
-LITELLM_TIMEOUT_SECONDS = float(os.getenv("LITELLM_TIMEOUT_SECONDS", "30"))
-_DISABLED_ENV_VALUES = {"0", "false", "no", "off"}
-
-WORKFLOW_ACTIONS = {
-    "world": {"approval", "report", "sql"},
-    "procurement": {"approval", "sql"},
-}
-AGENT_WORKFLOW_NAMES = {
-    "world-agent": "world",
-    "procurement-agent": "procurement",
-}
-
-LLM_PLANNER_SYSTEM_PROMPT = """
-You route enterprise agent requests to one workflow action.
-Return only a JSON object with this shape:
-{"action":"sql|report|approval","reason":"short reason"}
-
-Rules:
-- Choose "approval" for destructive, write, delete, data approval, or other human approval requests.
-- Choose "report" only for explicit report, dashboard, document, or export generation requests when report is allowed.
-- Choose "sql" for data lookup, analytics, list, show, count, compare, summarize, or read-only database questions.
-- Do not write SQL or tool payloads.
-""".strip()
+AGENT_SERVICES = os.getenv("AGENT_SERVICES", DEFAULT_AGENT_SERVICES)
+AGENT_CONNECT_TIMEOUT_SECONDS = float(os.getenv("AGENT_CONNECT_TIMEOUT_SECONDS", "5"))
+AGENT_READ_TIMEOUT_SECONDS = float(os.getenv("AGENT_READ_TIMEOUT_SECONDS", "60"))
 
 
 class AgentState(TypedDict):
@@ -96,6 +96,11 @@ completed_consumer_task: asyncio.Task[None] | None = None
 RUNS: dict[str, dict[str, Any]] = {}
 LANGFUSE_RUN_TRACES: dict[str, LangfuseRunTrace] = {}
 LANGFUSE_TOOL_TRACES: dict[str, LangfuseToolTrace] = {}
+agent_registry = AgentRegistry(
+    AGENT_SERVICES,
+    connect_timeout_seconds=AGENT_CONNECT_TIMEOUT_SECONDS,
+    read_timeout_seconds=AGENT_READ_TIMEOUT_SECONDS,
+)
 tracer = setup_observability("orchestrator")
 langfuse_tracer = setup_langfuse_observability("orchestrator")
 
@@ -134,128 +139,6 @@ def run_output_for_status(
     return "Agent request was received."
 
 
-def env_enabled(name: str, default: str = "true") -> bool:
-    return os.getenv(name, default).lower() not in _DISABLED_ENV_VALUES
-
-
-def langfuse_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def langfuse_payload(value: Any) -> Any:
-    if env_enabled("LANGFUSE_CAPTURE_CONTENT", "true"):
-        return value
-
-    if isinstance(value, str):
-        return {"content_length": len(value)}
-    if isinstance(value, list):
-        return [
-            {
-                "role": item.get("role"),
-                "content_length": len(str(item.get("content", ""))),
-            }
-            for item in value
-            if isinstance(item, dict)
-        ]
-    return {"content_type": type(value).__name__}
-
-
-def langfuse_planner_context(state: AgentState) -> dict[str, str]:
-    return {
-        "request_id": state["request_id"],
-        "tenant_id": state["tenant_id"],
-        "user_id": state["user_id"],
-        "agent_id": state["agent_id"],
-    }
-
-
-def langfuse_trace_attributes(
-    workflow: str,
-    context: dict[str, Any] | None,
-) -> dict[str, Any]:
-    context = context or {}
-    request_id = context.get("request_id")
-    run_trace = LANGFUSE_RUN_TRACES.get(str(request_id)) if request_id else None
-    if run_trace is not None:
-        return run_trace.trace_attributes
-
-    return {
-        "langfuse.trace.name": "agent-run",
-        "langfuse.user.id": context.get("user_id"),
-        "langfuse.session.id": context.get("session_id") or request_id,
-        "langfuse.trace.tags": [
-            "ai-agent-gateway",
-            "agent",
-            "llm-planner",
-            f"workflow:{workflow}",
-        ],
-        "langfuse.trace.input": context.get("trace_input"),
-        "langfuse.trace.metadata.agent_id": context.get("agent_id"),
-        "langfuse.trace.metadata.request_id": request_id,
-        "langfuse.trace.metadata.tenant_id": context.get("tenant_id"),
-        "langfuse.trace.metadata.workflow": workflow,
-        "langfuse.trace.metadata.tempo_trace_id": context.get("tempo_trace_id"),
-    }
-
-
-def litellm_usage_attributes(usage: dict[str, Any] | None) -> dict[str, Any]:
-    if not usage:
-        return {}
-
-    prompt_tokens = usage.get("prompt_tokens")
-    completion_tokens = usage.get("completion_tokens")
-    total_tokens = usage.get("total_tokens")
-    usage_details = {
-        "input": prompt_tokens,
-        "output": completion_tokens,
-        "total": total_tokens,
-    }
-    return clean_attributes(
-        {
-            "gen_ai.usage.input_tokens": prompt_tokens,
-            "gen_ai.usage.output_tokens": completion_tokens,
-            "gen_ai.usage.total_tokens": total_tokens,
-            "langfuse.observation.usage_details": langfuse_json(
-                {
-                    key: value
-                    for key, value in usage_details.items()
-                    if value is not None
-                },
-            ),
-        },
-    )
-
-
-def _trace_id(span: Span) -> str | None:
-    span_context = span.get_span_context()
-    if not span_context.is_valid:
-        return None
-    return f"{span_context.trace_id:032x}"
-
-
-def _langfuse_child_context(span: Span) -> Context | None:
-    span_context = span.get_span_context()
-    if not span_context.is_valid:
-        return None
-    return otel_trace.set_span_in_context(
-        NonRecordingSpan(span_context),
-        Context(),
-    )
-
-
-def _record_span_error(span: Span, exc: BaseException | str) -> None:
-    message = str(exc)
-    if isinstance(exc, BaseException):
-        span.record_exception(exc)
-    span.set_status(Status(StatusCode.ERROR, message))
-    span.set_attributes(
-        {
-            "langfuse.observation.level": "ERROR",
-            "langfuse.observation.status_message": message,
-        },
-    )
-
-
 @contextmanager
 def langfuse_agent_trace(
     *,
@@ -270,10 +153,10 @@ def langfuse_agent_trace(
     """Create the logical Langfuse root while preserving Tempo trace correlation."""
     tempo_parent_context = otel_context.get_current()
     tempo_span = otel_trace.get_current_span(tempo_parent_context)
-    tempo_trace_id = _trace_id(tempo_span)
+    tempo_trace_id = trace_id_hex(tempo_span)
     trace_input = langfuse_json(langfuse_payload(message))
     trace_attributes = clean_attributes(
-        langfuse_trace_attributes(
+        build_trace_attributes(
             workflow,
             {
                 "request_id": request_id,
@@ -302,7 +185,7 @@ def langfuse_agent_trace(
             },
         ),
     )
-    child_context = _langfuse_child_context(span)
+    child_context = span_child_context(span)
     if child_context is not None:
         LANGFUSE_RUN_TRACES[request_id] = LangfuseRunTrace(
             parent_context=child_context,
@@ -312,47 +195,8 @@ def langfuse_agent_trace(
     try:
         yield span
     except BaseException as exc:
-        _record_span_error(span, exc)
+        record_span_error(span, exc)
         discard_langfuse_run_trace(request_id, "Agent run failed")
-        raise
-    finally:
-        span.end()
-
-
-@contextmanager
-def langfuse_generation_span(
-    workflow: str,
-    message: str,
-    context: dict[str, Any] | None,
-):
-    """Record a planner generation under the logical Langfuse agent trace."""
-    context = context or {}
-    request_id = context.get("request_id")
-    run_trace = LANGFUSE_RUN_TRACES.get(str(request_id)) if request_id else None
-    span = langfuse_tracer.start_span(
-        "orchestrator.llm_plan",
-        context=run_trace.parent_context if run_trace else Context(),
-        kind=SpanKind.CLIENT,
-        attributes=clean_attributes(
-            {
-                "app.workflow": workflow,
-                "app.planner.model": LITELLM_MODEL or None,
-                "app.user_message.length": len(message),
-                "gen_ai.operation.name": "chat",
-                "gen_ai.system": "openai",
-                "gen_ai.request.model": LITELLM_MODEL or None,
-                "langfuse.observation.type": "generation",
-                "langfuse.observation.model.name": LITELLM_MODEL or None,
-                "langfuse.observation.metadata.kind": "planner",
-                "langfuse.observation.metadata.provider": "litellm",
-                **langfuse_trace_attributes(workflow, context),
-            },
-        ),
-    )
-    try:
-        yield span
-    except BaseException as exc:
-        _record_span_error(span, exc)
         raise
     finally:
         span.end()
@@ -406,7 +250,7 @@ def fail_langfuse_tool_trace(tool_call_id: str, exc: BaseException | str) -> Non
     tool_trace = LANGFUSE_TOOL_TRACES.pop(tool_call_id, None)
     if tool_trace is None:
         return
-    _record_span_error(tool_trace.span, exc)
+    record_span_error(tool_trace.span, exc)
     tool_trace.span.end()
 
 
@@ -443,7 +287,7 @@ def finish_langfuse_tool_trace(event: dict[str, Any], output: str) -> None:
         ),
     )
     if status == "failed":
-        _record_span_error(span, "Tool execution failed")
+        record_span_error(span, "Tool execution failed")
     span.end()
     LANGFUSE_RUN_TRACES.pop(request_id, None)
 
@@ -454,7 +298,7 @@ def discard_langfuse_run_trace(request_id: str, reason: str | None = None) -> No
             continue
         LANGFUSE_TOOL_TRACES.pop(tool_call_id, None)
         if reason:
-            _record_span_error(tool_trace.span, reason)
+            record_span_error(tool_trace.span, reason)
         tool_trace.span.end()
     LANGFUSE_RUN_TRACES.pop(request_id, None)
 
@@ -583,146 +427,6 @@ def can_use_tool(state: AgentState, tool: str) -> bool:
     )
 
 
-def fallback_plan_action(workflow: str, message: str) -> str:
-    text = message.lower()
-    if "delete" in text or "remove" in text:
-        return "approval"
-
-    if workflow == "world":
-        if "report" in text:
-            return "report"
-        return "sql"
-
-    return "sql"
-
-
-async def litellm_plan_action(
-    workflow: str,
-    message: str,
-    context: dict[str, Any] | None = None,
-) -> str | None:
-    with langfuse_generation_span(workflow, message, context) as span:
-        if not LITELLM_API_KEY or not LITELLM_MODEL:
-            span.set_attribute("app.planner.result", "not_configured")
-            return None
-
-        allowed_actions = WORKFLOW_ACTIONS[workflow]
-        payload = {
-            "model": LITELLM_MODEL,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": LLM_PLANNER_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Workflow: {workflow}\n"
-                        f"Allowed actions: {', '.join(sorted(allowed_actions))}\n"
-                        f"User message: {message}"
-                    ),
-                },
-            ],
-        }
-        span.set_attribute(
-            "langfuse.observation.input",
-            langfuse_json(langfuse_payload(payload["messages"])),
-        )
-        headers = {
-            "Authorization": f"Bearer {LITELLM_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=LITELLM_TIMEOUT_SECONDS) as client:
-                response = await client.post(
-                    f"{LITELLM_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-                span.set_attribute("http.response.status_code", response.status_code)
-                response.raise_for_status()
-
-            response_body = response.json()
-            content = response_body["choices"][0]["message"]["content"]
-            span.set_attributes(
-                clean_attributes(
-                    {
-                        "gen_ai.response.model": response_body.get("model")
-                        or LITELLM_MODEL,
-                        "langfuse.observation.model.name": response_body.get("model")
-                        or LITELLM_MODEL,
-                        "langfuse.observation.output": langfuse_json(
-                            langfuse_payload(content),
-                        ),
-                    },
-                ),
-            )
-            span.set_attributes(
-                litellm_usage_attributes(response_body.get("usage")),
-            )
-            decision = json.loads(content)
-        except (
-            httpx.HTTPError,
-            KeyError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, "LiteLLM planning failed"))
-            span.set_attributes(
-                {
-                    "app.planner.result": "fallback",
-                    "langfuse.observation.level": "ERROR",
-                    "langfuse.observation.status_message": str(exc),
-                },
-            )
-            return None
-
-        action = str(decision.get("action", "")).strip().lower()
-        if action in allowed_actions:
-            span.set_attributes(
-                {"app.planner.result": "selected", "app.workflow.action": action},
-            )
-            return action
-
-        span.set_attributes(
-            {"app.planner.result": "invalid_action", "app.workflow.action": action},
-        )
-        return None
-
-
-async def choose_plan_action(
-    workflow: str,
-    message: str,
-    context: dict[str, Any] | None = None,
-) -> str:
-    with tracer.start_as_current_span(
-        "orchestrator.choose_plan_action",
-        kind=SpanKind.INTERNAL,
-        attributes=clean_attributes(
-            {
-                "app.workflow": workflow,
-                "app.user_message.length": len(message),
-            },
-        ),
-    ) as span:
-        action = await litellm_plan_action(workflow, message, context)
-        if action is not None:
-            span.set_attributes(
-                {"app.workflow.action": action, "app.planner.source": "litellm"},
-            )
-            return action
-
-        fallback_action = fallback_plan_action(workflow, message)
-        span.set_attributes(
-            {
-                "app.workflow.action": fallback_action,
-                "app.planner.source": "fallback",
-            },
-        )
-        return fallback_action
-
-
 async def deny_permission_access(
     state: AgentState,
     workflow: str,
@@ -753,7 +457,7 @@ async def deny_permission_access(
                 "reason": denied_reason,
             },
         )
-    return {"denied_reason": denied_reason}
+    return {"needs_approval": False, "denied_reason": denied_reason}
 
 
 async def deny_tool_access(
@@ -786,177 +490,126 @@ async def deny_tool_access(
                 "reason": denied_reason,
             },
         )
-    return {"denied_reason": denied_reason}
+    return {"needs_approval": False, "denied_reason": denied_reason}
 
 
-async def world_plan(state: AgentState) -> dict[str, Any]:
+async def invoke_agent_service(
+    agent: RegisteredAgent,
+    state: AgentState,
+    thread_id: str | None,
+    langfuse_span: Span,
+) -> dict[str, Any]:
+    """Call the agent service's /runs endpoint and return its decision."""
+    headers = {
+        "x-request-id": state["request_id"],
+        "x-tenant-id": state["tenant_id"],
+        "x-user-id": state["user_id"],
+    }
+    langfuse_parent = traceparent_value(langfuse_span)
+    if langfuse_parent:
+        headers[LANGFUSE_PARENT_HEADER] = langfuse_parent
+
     with tracer.start_as_current_span(
-        "agent.plan.world",
-        kind=SpanKind.INTERNAL,
+        "orchestrator.agent_invoke",
+        kind=SpanKind.CLIENT,
         attributes=clean_attributes(
             {
                 "app.request_id": state["request_id"],
-                "app.agent_id": state["agent_id"],
-                "app.workflow": "world",
-                "app.allowed_permissions": state["allowed_permissions"],
+                "app.agent_id": agent.agent_id,
+                "app.workflow": agent.workflow,
+                "server.address": agent.base_url,
             },
         ),
     ) as span:
-        action = await choose_plan_action(
-            "world",
-            state["message"],
-            langfuse_planner_context(state),
-        )
-        span.set_attribute("app.workflow.action", action)
-
-        if action == "approval":
-            await publish(
-                "audit.events",
-                {**state, "workflow": "world", "event": "human_approval_required"},
-            )
-            span.set_attribute("app.run_status", "requires_approval")
-            return {"needs_approval": True}
-
-        if action == "report":
-            if not can_use_permission(state, "world-db"):
-                return await deny_permission_access(state, "world", "world-db")
-            if not can_use_tool(state, "report"):
-                return await deny_tool_access(state, "world", "report")
-
-            tool_call_id = f"{state['request_id']}:report:1"
-            span.set_attributes(
-                {"app.tool": "report", "app.tool_call_id": tool_call_id},
-            )
-            await publish(
-                "tool.requested",
+        try:
+            response = await agent_registry.invoke_run(
+                agent,
                 {
-                    **state,
-                    "tool": "report",
-                    "tool_call_id": tool_call_id,
-                    "workflow": "world",
-                    "input": {
-                        "report_type": "world_market_summary",
-                        "database": "world",
-                    },
+                    "request_id": state["request_id"],
+                    "tenant_id": state["tenant_id"],
+                    "user_id": state["user_id"],
+                    "agent_id": state["agent_id"],
+                    "message": state["message"],
+                    "thread_id": thread_id,
+                    "allowed_permissions": state["allowed_permissions"],
+                    "policy_subjects": state["policy_subjects"],
                 },
+                headers=headers,
             )
-            span.set_attribute("app.run_status", "running")
-            return {"needs_approval": False, "denied_reason": None}
+        except AgentServiceError as error:
+            span.set_status(Status(StatusCode.ERROR, error.detail))
+            raise HTTPException(status_code=error.status_code, detail=error.detail)
 
-        if not can_use_permission(state, "world-db"):
-            return await deny_permission_access(state, "world", "world-db")
-        if not can_use_tool(state, "sql"):
-            return await deny_tool_access(state, "world", "sql")
+        decision = response["decision"]
+        span.set_attributes(
+            clean_attributes(
+                {
+                    "app.decision.action": decision.get("action"),
+                    "app.tool": decision.get("tool"),
+                    "app.planner.source": decision.get("planner_source"),
+                },
+            ),
+        )
+        return decision
 
-        tool_call_id = f"{state['request_id']}:sql:1"
-        span.set_attributes({"app.tool": "sql", "app.tool_call_id": tool_call_id})
+
+async def apply_agent_decision(
+    state: AgentState,
+    workflow: str,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    """Enforce Casbin policy on the agent's decision, then execute it."""
+    action = decision.get("action")
+
+    if action == "approval":
+        await publish(
+            "audit.events",
+            {
+                **state,
+                "workflow": workflow,
+                "event": decision.get("audit_event") or "human_approval_required",
+            },
+        )
+        return {"needs_approval": True, "denied_reason": None}
+
+    if action == "deny":
+        return {
+            "needs_approval": False,
+            "denied_reason": decision.get("reason") or "Agent denied the request",
+        }
+
+    if action == "tool":
+        tool = str(decision.get("tool") or "")
+        permission = decision.get("required_permission")
+        if permission and not can_use_permission(state, str(permission)):
+            return await deny_permission_access(state, workflow, str(permission))
+        if not tool or not can_use_tool(state, tool):
+            return await deny_tool_access(state, workflow, tool or "unknown")
+
+        tool_call_id = f"{state['request_id']}:{tool}:1"
         await publish(
             "tool.requested",
             {
                 **state,
-                "tool": "sql",
+                "tool": tool,
                 "tool_call_id": tool_call_id,
-                "workflow": "world",
-                "input": {
-                    "database": "world",
-                    "sql": (
-                        "select city.name as city, country.name as country, "
-                        "country.continent, city.district, city.population "
-                        "from city "
-                        "join country on country.code = city.country_code "
-                        "order by city.population desc "
-                        "limit 10"
-                    )
-                },
+                "workflow": workflow,
+                "input": decision.get("tool_input") or {},
             },
         )
-        span.set_attribute("app.run_status", "running")
         return {"needs_approval": False, "denied_reason": None}
 
-
-async def procurement_plan(state: AgentState) -> dict[str, Any]:
-    with tracer.start_as_current_span(
-        "agent.plan.procurement",
-        kind=SpanKind.INTERNAL,
-        attributes=clean_attributes(
-            {
-                "app.request_id": state["request_id"],
-                "app.agent_id": state["agent_id"],
-                "app.workflow": "procurement",
-                "app.allowed_permissions": state["allowed_permissions"],
-            },
-        ),
-    ) as span:
-        action = await choose_plan_action(
-            "procurement",
-            state["message"],
-            langfuse_planner_context(state),
-        )
-        span.set_attribute("app.workflow.action", action)
-
-        if action == "approval":
-            await publish(
-                "audit.events",
-                {**state, "workflow": "procurement", "event": "procurement_approval_required"},
-            )
-            span.set_attribute("app.run_status", "requires_approval")
-            return {"needs_approval": True}
-
-        if not can_use_permission(state, "procurement-db"):
-            return await deny_permission_access(state, "procurement", "procurement-db")
-        if not can_use_tool(state, "sql"):
-            return await deny_tool_access(state, "procurement", "sql")
-
-        tool_call_id = f"{state['request_id']}:sql:1"
-        span.set_attributes({"app.tool": "sql", "app.tool_call_id": tool_call_id})
-        await publish(
-            "tool.requested",
-            {
-                **state,
-                "tool": "sql",
-                "tool_call_id": tool_call_id,
-                "workflow": "procurement",
-                "input": {
-                    "database": "procurement",
-                    "sql": (
-                        "select supplier_name, category, country, total_spend, "
-                        "order_count, risk_level, last_order_date "
-                        "from supplier_summary "
-                        "order by total_spend desc "
-                        "limit 10"
-                    )
-                },
-            },
-        )
-        span.set_attribute("app.run_status", "running")
-        return {"needs_approval": False, "denied_reason": None}
-
-
-def route_after_plan(state: AgentState) -> str:
-    return END
-
-
-def build_workflow(name: str, plan_node) -> Any:
-    builder = StateGraph(AgentState)
-    builder.add_node(name, plan_node)
-    builder.set_entry_point(name)
-    builder.add_conditional_edges(name, route_after_plan)
-    return builder.compile(
-        checkpointer=InMemorySaver(),
-        store=InMemoryStore(),
-    )
-
-
-WORKFLOWS = {
-    "world-agent": build_workflow("world_plan", world_plan),
-    "procurement-agent": build_workflow("procurement_plan", procurement_plan),
-}
+    return {
+        "needs_approval": False,
+        "denied_reason": f"Agent returned an unsupported action: {action}",
+    }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global completed_consumer, completed_consumer_task, producer
 
+    await agent_registry.start()
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP)
     completed_consumer = AIOKafkaConsumer(
         "tool.completed",
@@ -976,6 +629,7 @@ async def lifespan(app: FastAPI):
         if completed_consumer is not None:
             await completed_consumer.stop()
         await producer.stop()
+        await agent_registry.aclose()
         close_pending_langfuse_traces()
         completed_consumer_task = None
         completed_consumer = None
@@ -1041,15 +695,15 @@ async def run(
             },
         )
 
-        workflow = WORKFLOWS.get(agent_id)
-        if workflow is None:
+        agent = agent_registry.get(agent_id)
+        if agent is None:
             span.set_status(Status(StatusCode.ERROR, "Unknown agent_id"))
             raise HTTPException(
                 status_code=404,
-                detail=f"Unknown agent_id. Available agents: {sorted(WORKFLOWS)}",
+                detail=f"Unknown agent_id. Available agents: {agent_registry.agent_ids}",
             )
 
-        workflow_name = AGENT_WORKFLOW_NAMES.get(agent_id, agent_id)
+        workflow_name = agent.workflow
         with langfuse_agent_trace(
             request_id=x_request_id,
             session_id=body.thread_id or x_request_id,
@@ -1060,10 +714,26 @@ async def run(
             message=body.message,
         ) as langfuse_span:
             await publish("agent.requested", state)
-            result = await workflow.ainvoke(
-                state,
-                {"configurable": {"thread_id": body.thread_id or x_request_id}},
-            )
+            try:
+                decision = await invoke_agent_service(
+                    agent,
+                    state,
+                    body.thread_id,
+                    langfuse_span,
+                )
+            except HTTPException as error:
+                remember_run(
+                    x_request_id,
+                    {
+                        "status": "failed",
+                        "agent_id": agent_id,
+                        "denied_reason": None,
+                        "output": error.detail,
+                    },
+                )
+                raise
+
+            result = await apply_agent_decision(state, workflow_name, decision)
 
             if result.get("denied_reason"):
                 status = "denied"
@@ -1079,7 +749,7 @@ async def run(
             )
             if status == "denied":
                 span.set_status(Status(StatusCode.ERROR, denied_reason))
-                _record_span_error(langfuse_span, denied_reason or "Agent run denied")
+                record_span_error(langfuse_span, denied_reason or "Agent run denied")
             span.set_attributes(
                 clean_attributes(
                     {
@@ -1126,6 +796,28 @@ async def run(
                 "agent_id": agent_id,
                 "denied_reason": denied_reason,
             }
+
+
+@app.get("/internal/health", include_in_schema=False)
+async def internal_health() -> dict[str, str]:
+    return {"status": "ok", "service": "orchestrator"}
+
+
+@app.get("/internal/agents", include_in_schema=False)
+async def list_agents() -> dict[str, Any]:
+    return {
+        "agents": [
+            {
+                "agent_id": agent.agent_id,
+                "name": agent.name,
+                "workflow": agent.workflow,
+                "base_url": agent.base_url,
+                "card": agent.card,
+            }
+            for agent_id in agent_registry.agent_ids
+            if (agent := agent_registry.get(agent_id)) is not None
+        ],
+    }
 
 
 @app.get("/internal/runs/{run_id}")

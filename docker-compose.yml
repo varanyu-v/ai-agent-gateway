@@ -350,6 +350,15 @@ services:
     command: uvicorn apps.gateway.main:app --host 0.0.0.0 --port 8000
     environment:
       <<: *app-env
+      GATEWAY_RATE_LIMIT_ENABLED: ${GATEWAY_RATE_LIMIT_ENABLED:-true}
+      GATEWAY_RUN_RATE_PER_MINUTE: ${GATEWAY_RUN_RATE_PER_MINUTE:-30}
+      GATEWAY_RUN_RATE_BURST: ${GATEWAY_RUN_RATE_BURST:-10}
+      GATEWAY_MAX_MESSAGE_CHARS: ${GATEWAY_MAX_MESSAGE_CHARS:-4000}
+      GATEWAY_IDEMPOTENCY_TTL_SECONDS: ${GATEWAY_IDEMPOTENCY_TTL_SECONDS:-600}
+      GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS:-5}
+      GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS: ${GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS:-60}
+      GATEWAY_BREAKER_FAILURE_THRESHOLD: ${GATEWAY_BREAKER_FAILURE_THRESHOLD:-5}
+      GATEWAY_BREAKER_RESET_SECONDS: ${GATEWAY_BREAKER_RESET_SECONDS:-30}
     ports:
       - "8000:8000"
     depends_on:
@@ -362,7 +371,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5
@@ -373,17 +382,62 @@ services:
     command: uvicorn apps.orchestrator.main:app --host 0.0.0.0 --port 8001
     environment:
       <<: *app-env
+      AGENT_SERVICES: ${AGENT_SERVICES:-world-agent=http://world-agent:8004,procurement-agent=http://procurement-agent:8005}
+      AGENT_CONNECT_TIMEOUT_SECONDS: ${AGENT_CONNECT_TIMEOUT_SECONDS:-5}
+      AGENT_READ_TIMEOUT_SECONDS: ${AGENT_READ_TIMEOUT_SECONDS:-60}
     ports:
       - "8001:8001"
     depends_on:
       kafka:
+        condition: service_healthy
+      world-agent:
+        condition: service_healthy
+      procurement-agent:
         condition: service_healthy
       otel-collector:
         condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/internal/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  world-agent:
+    <<: *app
+    command: uvicorn apps.agents.world.main:app --host 0.0.0.0 --port 8004
+    environment:
+      <<: *app-env
+    ports:
+      - "8004:8004"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procurement-agent:
+    <<: *app
+    command: uvicorn apps.agents.procurement.main:app --host 0.0.0.0 --port 8005
+    environment:
+      <<: *app-env
+    ports:
+      - "8005:8005"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5

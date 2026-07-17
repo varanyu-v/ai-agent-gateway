@@ -1,14 +1,14 @@
-import os
+import math
+import re
+import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Awaitable, Callable
 
-import httpx
-import jwt
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jwt import PyJWKClient
+from opentelemetry import metrics
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 
@@ -22,48 +22,122 @@ from apps.authz import (
     policy_subjects,
     tool_access_rules,
 )
+from apps.gateway.auth import current_user
+from apps.gateway.config import settings
+from apps.gateway.proxy import CircuitBreaker, OrchestratorClient, UpstreamError
+from apps.gateway.traffic import (
+    IdempotencyCache,
+    IdempotencyConflict,
+    TokenBucketRateLimiter,
+    payload_fingerprint,
+)
 from apps.observability import clean_attributes, setup_observability
 
 
-ISSUER = os.getenv("KEYCLOAK_ISSUER", "http://localhost:8080/realms/ptvn")
-AUDIENCE = os.getenv("KEYCLOAK_AUDIENCE", "agent-gateway")
-KEYCLOAK_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "agent-frontend")
-JWKS_URL = os.getenv(
-    "KEYCLOAK_JWKS_URL",
-    f"{ISSUER}/protocol/openid-connect/certs",
-)
-ORCH_URL = os.getenv("ORCH_URL", "http://localhost:8001")
-GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
-PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
-DEFAULT_LOKI_EXPLORE_PATH = (
-    "/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,"
-    "%22queries%22:%5B%7B%22expr%22:%22%7Bservice%3D%5C%22gateway%5C%22%7D%22%7D%5D,"
-    "%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D"
-)
-LOKI_UI_URL = os.getenv(
-    "LOKI_UI_URL",
-    f"{GRAFANA_URL.rstrip('/')}{DEFAULT_LOKI_EXPLORE_PATH}",
-)
-DEFAULT_TEMPO_EXPLORE_PATH = (
-    "/explore?orgId=1&left=%7B%22datasource%22:%22tempo%22,"
-    "%22queries%22:%5B%5D,"
-    "%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D"
-)
-TEMPO_UI_URL = os.getenv(
-    "TEMPO_UI_URL",
-    f"{GRAFANA_URL.rstrip('/')}{DEFAULT_TEMPO_EXPLORE_PATH}",
-)
 UI_FILE = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
+UI_PATHS = {"/", "/ui"}
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
+SERVICE_STARTED_AT = time.monotonic()
 
-jwks = PyJWKClient(JWKS_URL)
-security = HTTPBearer()
-app = FastAPI(title="AI Agent Gateway")
+orchestrator = OrchestratorClient(
+    base_url=settings.orchestrator_url,
+    connect_timeout_seconds=settings.upstream_connect_timeout_seconds,
+    read_timeout_seconds=settings.upstream_read_timeout_seconds,
+    breaker=CircuitBreaker(
+        failure_threshold=settings.breaker_failure_threshold,
+        reset_seconds=settings.breaker_reset_seconds,
+    ),
+)
+rate_limiter = TokenBucketRateLimiter(
+    rate_per_second=settings.run_rate_per_minute / 60.0,
+    burst=settings.run_rate_burst,
+)
+idempotency_cache = IdempotencyCache(ttl_seconds=settings.idempotency_ttl_seconds)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    await orchestrator.start()
+    yield
+    await orchestrator.aclose()
+
+
+app = FastAPI(title="AI Agent Gateway", lifespan=lifespan)
 tracer = setup_observability("gateway", app)
+meter = metrics.get_meter("gateway")
+run_requests = meter.create_counter(
+    "gateway.agent_runs",
+    description="Agent run requests received by the gateway, by agent and outcome",
+)
+upstream_failures = meter.create_counter(
+    "gateway.upstream_failures",
+    description="Upstream orchestrator failures observed by the gateway",
+)
 
 
 class AgentRunRequest(BaseModel):
     message: str
     thread_id: str | None = None
+
+
+@app.middleware("http")
+async def request_context(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+) -> Response:
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if REQUEST_ID_PATTERN.fullmatch(incoming) else str(uuid.uuid4())
+    request.state.request_id = request_id
+
+    response = await call_next(request)
+
+    response.headers["x-request-id"] = request_id
+    response.headers.setdefault("x-content-type-options", "nosniff")
+    if request.url.path not in UI_PATHS:
+        response.headers.setdefault("cache-control", "no-store")
+    return response
+
+
+def can_access_agent(user: dict[str, Any], agent_id: str) -> bool:
+    return can_invoke_agent(user, agent_id)
+
+
+def allowed_permissions(user: dict[str, Any]) -> list[str]:
+    return allowed_data_sources(user)
+
+
+def trusted_context_headers(request_id: str, user: dict[str, Any]) -> dict[str, str]:
+    return {
+        "x-request-id": request_id,
+        "x-tenant-id": user["tenant_id"],
+        "x-user-id": user["user_id"],
+    }
+
+
+def retry_after_headers(retry_after_seconds: float | None) -> dict[str, str] | None:
+    if not retry_after_seconds:
+        return None
+    return {"retry-after": str(max(1, math.ceil(retry_after_seconds)))}
+
+
+def upstream_http_error(error: UpstreamError) -> HTTPException:
+    upstream_failures.add(
+        1,
+        {"app.upstream": "orchestrator", "app.status_code": error.status_code},
+    )
+    return HTTPException(
+        status_code=error.status_code,
+        detail=error.detail,
+        headers=retry_after_headers(error.retry_after_seconds),
+    )
+
+
+def upstream_detail(response: Any, fallback: str) -> str:
+    try:
+        detail = response.json().get("detail")
+    except ValueError:
+        detail = None
+    return str(detail) if detail else fallback
 
 
 @app.get("/", include_in_schema=False)
@@ -76,79 +150,48 @@ async def test_console_alias() -> FileResponse:
     return FileResponse(UI_FILE)
 
 
+@app.get("/healthz", include_in_schema=False)
+async def healthz() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "service": "gateway",
+        "uptime_seconds": round(time.monotonic() - SERVICE_STARTED_AT, 3),
+    }
+
+
+@app.get("/readyz", include_in_schema=False)
+async def readyz() -> dict[str, Any]:
+    try:
+        response = await orchestrator.request("GET", "/internal/health")
+    except UpstreamError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Orchestrator is not ready: {error.detail}",
+            headers=retry_after_headers(error.retry_after_seconds),
+        )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=503, detail="Orchestrator is not ready")
+    return {"status": "ready", "orchestrator": "ok"}
+
+
 @app.get("/ui/config", include_in_schema=False)
 async def ui_config() -> dict[str, Any]:
     return {
-        "keycloakIssuer": ISSUER,
-        "keycloakTokenUrl": f"{ISSUER}/protocol/openid-connect/token",
-        "keycloakClientId": KEYCLOAK_CLIENT_ID,
-        "audience": AUDIENCE,
+        "keycloakIssuer": settings.issuer,
+        "keycloakTokenUrl": f"{settings.issuer}/protocol/openid-connect/token",
+        "keycloakClientId": settings.keycloak_client_id,
+        "audience": settings.audience,
         "policyMode": "casbin",
         "agents": agent_access_rules(),
         "tools": data_source_access_rules(),
         "toolPolicies": tool_access_rules(),
         "monitorTools": [
-            {"id": "grafana", "label": "Grafana", "url": GRAFANA_URL},
-            {"id": "prometheus", "label": "Prometheus", "url": PROMETHEUS_URL},
-            {"id": "loki", "label": "Loki", "url": LOKI_UI_URL},
-            {"id": "tempo", "label": "Tempo", "url": TEMPO_UI_URL},
+            {"id": "grafana", "label": "Grafana", "url": settings.grafana_url},
+            {"id": "prometheus", "label": "Prometheus", "url": settings.prometheus_url},
+            {"id": "loki", "label": "Loki", "url": settings.loki_ui_url},
+            {"id": "tempo", "label": "Tempo", "url": settings.tempo_ui_url},
         ],
     }
-
-
-def current_user(
-    creds: HTTPAuthorizationCredentials = Depends(security),
-) -> dict[str, Any]:
-    with tracer.start_as_current_span(
-        "gateway.jwt_validation",
-        kind=SpanKind.INTERNAL,
-        attributes={"app.auth.issuer": ISSUER, "app.auth.audience": AUDIENCE},
-    ) as span:
-        token = creds.credentials
-        signing_key = jwks.get_signing_key_from_jwt(token).key
-
-        claims = jwt.decode(
-            token,
-            signing_key,
-            algorithms=["RS256"],
-            audience=AUDIENCE,
-            issuer=ISSUER,
-        )
-
-        tenant_id = claims.get("tenant_id")
-        if not tenant_id:
-            span.set_status(Status(StatusCode.ERROR, "Token is missing tenant_id"))
-            raise HTTPException(status_code=401, detail="Token is missing tenant_id")
-
-        user_id = claims.get("sub") or claims.get("preferred_username") or claims.get("email")
-        if not user_id:
-            span.set_status(Status(StatusCode.ERROR, "Token is missing user identity"))
-            raise HTTPException(status_code=401, detail="Token is missing user identity")
-
-        roles = claims.get("realm_access", {}).get("roles", [])
-        span.set_attributes(
-            clean_attributes(
-                {
-                    "app.tenant_id": tenant_id,
-                    "app.user_id": user_id,
-                    "app.role_count": len(roles),
-                },
-            ),
-        )
-
-        return {
-            "user_id": user_id,
-            "tenant_id": tenant_id,
-            "roles": roles,
-        }
-
-
-def can_access_agent(user: dict[str, Any], agent_id: str) -> bool:
-    return can_invoke_agent(user, agent_id)
-
-
-def allowed_permissions(user: dict[str, Any]) -> list[str]:
-    return allowed_data_sources(user)
 
 
 @app.get("/ui/permissions", include_in_schema=False)
@@ -172,9 +215,12 @@ async def ui_permissions(
 async def run_agent(
     agent_id: str,
     body: AgentRunRequest,
+    request: Request,
+    response: Response,
     user: dict[str, Any] = Depends(current_user),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
-    request_id = str(uuid.uuid4())
+    request_id = request.state.request_id
     permissions = allowed_permissions(user)
     subjects = policy_subjects(user)
     with tracer.start_as_current_span(
@@ -192,30 +238,110 @@ async def run_agent(
             },
         ),
     ) as span:
+        if not body.message.strip():
+            span.set_status(Status(StatusCode.ERROR, "Empty message"))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "invalid"})
+            raise HTTPException(status_code=422, detail="message must not be empty")
+        if len(body.message) > settings.max_message_chars:
+            span.set_status(Status(StatusCode.ERROR, "Message too long"))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "invalid"})
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "message exceeds the maximum length of "
+                    f"{settings.max_message_chars} characters"
+                ),
+            )
+        if body.thread_id and len(body.thread_id) > settings.max_thread_id_chars:
+            span.set_status(Status(StatusCode.ERROR, "thread_id too long"))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "invalid"})
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "thread_id exceeds the maximum length of "
+                    f"{settings.max_thread_id_chars} characters"
+                ),
+            )
+
+        if settings.rate_limit_enabled:
+            decision = await rate_limiter.acquire(
+                f"{user['tenant_id']}:{user['user_id']}",
+            )
+            if not decision.allowed:
+                span.set_attribute("app.outcome", "throttled")
+                span.set_status(Status(StatusCode.ERROR, "Run rate limit exceeded"))
+                run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "throttled"})
+                raise HTTPException(
+                    status_code=429,
+                    detail="Run rate limit exceeded; retry later",
+                    headers=retry_after_headers(decision.retry_after_seconds),
+                )
+
         if not can_access_agent(user, agent_id):
             span.set_attribute("app.authorization.outcome", "denied")
             span.set_status(Status(StatusCode.ERROR, "User cannot access this agent"))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "denied"})
             raise HTTPException(status_code=403, detail="User cannot access this agent")
 
         span.set_attribute("app.authorization.outcome", "allowed")
+
+        idempotency_scope: str | None = None
+        if idempotency_key:
+            idempotency_scope = (
+                f"{user['tenant_id']}:{user['user_id']}:{agent_id}:{idempotency_key}"
+            )
+            fingerprint = payload_fingerprint(
+                {
+                    "agent_id": agent_id,
+                    "message": body.message,
+                    "thread_id": body.thread_id,
+                },
+            )
+            try:
+                cached = await idempotency_cache.reserve(idempotency_scope, fingerprint)
+            except IdempotencyConflict as conflict:
+                span.set_status(Status(StatusCode.ERROR, str(conflict)))
+                raise HTTPException(status_code=409, detail=str(conflict))
+            if cached is not None:
+                span.set_attribute("app.idempotent_replay", True)
+                run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "replayed"})
+                response.headers["x-idempotent-replay"] = "true"
+                return cached
+
         headers = {
-            "x-request-id": request_id,
-            "x-tenant-id": user["tenant_id"],
-            "x-user-id": user["user_id"],
+            **trusted_context_headers(request_id, user),
             "x-allowed-permissions": ",".join(permissions),
             "x-policy-subjects": ",".join(subjects),
         }
 
-        async with httpx.AsyncClient(base_url=ORCH_URL, timeout=60) as client:
-            response = await client.post(
+        try:
+            upstream = await orchestrator.request(
+                "POST",
                 f"/internal/agents/{agent_id}/runs",
-                json=body.model_dump(),
                 headers=headers,
+                json_body=body.model_dump(),
             )
-            span.set_attribute("http.response.status_code", response.status_code)
-            response.raise_for_status()
+        except UpstreamError as error:
+            if idempotency_scope:
+                await idempotency_cache.release(idempotency_scope)
+            span.set_status(Status(StatusCode.ERROR, error.detail))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "upstream_error"})
+            raise upstream_http_error(error)
 
-        payload = response.json()
+        span.set_attribute("http.response.status_code", upstream.status_code)
+        if upstream.status_code >= 400:
+            if idempotency_scope:
+                await idempotency_cache.release(idempotency_scope)
+            detail = upstream_detail(upstream, "Orchestrator rejected the request")
+            span.set_status(Status(StatusCode.ERROR, detail))
+            run_requests.add(1, {"app.agent_id": agent_id, "app.outcome": "rejected"})
+            raise HTTPException(status_code=upstream.status_code, detail=detail)
+
+        payload = upstream.json()
+        result = {"request_id": request_id, **payload}
+        if idempotency_scope:
+            await idempotency_cache.complete(idempotency_scope, result)
+
         span.set_attributes(
             clean_attributes(
                 {
@@ -225,13 +351,18 @@ async def run_agent(
                 },
             ),
         )
+        run_requests.add(
+            1,
+            {"app.agent_id": agent_id, "app.outcome": payload.get("status", "unknown")},
+        )
 
-    return {"request_id": request_id, **payload}
+    return result
 
 
 @app.get("/runs/{run_id}")
 async def get_run_status(
     run_id: str,
+    request: Request,
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     with tracer.start_as_current_span(
@@ -245,21 +376,26 @@ async def get_run_status(
             },
         ),
     ) as span:
-        headers = {
-            "x-tenant-id": user["tenant_id"],
-            "x-user-id": user["user_id"],
-        }
+        try:
+            upstream = await orchestrator.request(
+                "GET",
+                f"/internal/runs/{run_id}",
+                headers=trusted_context_headers(request.state.request_id, user),
+            )
+        except UpstreamError as error:
+            span.set_status(Status(StatusCode.ERROR, error.detail))
+            raise upstream_http_error(error)
 
-        async with httpx.AsyncClient(base_url=ORCH_URL, timeout=60) as client:
-            response = await client.get(f"/internal/runs/{run_id}", headers=headers)
-
-        span.set_attribute("http.response.status_code", response.status_code)
-        if response.status_code == 404:
+        span.set_attribute("http.response.status_code", upstream.status_code)
+        if upstream.status_code == 404:
             span.set_status(Status(StatusCode.ERROR, "Run not found"))
             raise HTTPException(status_code=404, detail="Run not found")
+        if upstream.status_code >= 400:
+            detail = upstream_detail(upstream, "Orchestrator rejected the request")
+            span.set_status(Status(StatusCode.ERROR, detail))
+            raise HTTPException(status_code=upstream.status_code, detail=detail)
 
-        response.raise_for_status()
-        payload = response.json()
+        payload = upstream.json()
         span.set_attributes(
             clean_attributes(
                 {
@@ -276,6 +412,7 @@ async def get_run_status(
 @app.post("/runs/{run_id}/approve")
 async def approve_run(
     run_id: str,
+    request: Request,
     user: dict[str, Any] = Depends(current_user),
 ) -> dict[str, Any]:
     with tracer.start_as_current_span(
@@ -289,25 +426,26 @@ async def approve_run(
             },
         ),
     ) as span:
-        headers = {
-            "x-tenant-id": user["tenant_id"],
-            "x-user-id": user["user_id"],
-        }
+        try:
+            upstream = await orchestrator.request(
+                "POST",
+                f"/internal/runs/{run_id}/approve",
+                headers=trusted_context_headers(request.state.request_id, user),
+            )
+        except UpstreamError as error:
+            span.set_status(Status(StatusCode.ERROR, error.detail))
+            raise upstream_http_error(error)
 
-        async with httpx.AsyncClient(base_url=ORCH_URL, timeout=60) as client:
-            response = await client.post(f"/internal/runs/{run_id}/approve", headers=headers)
-
-        span.set_attribute("http.response.status_code", response.status_code)
-        if response.status_code == 404:
+        span.set_attribute("http.response.status_code", upstream.status_code)
+        if upstream.status_code == 404:
             span.set_status(Status(StatusCode.ERROR, "Run not found"))
             raise HTTPException(status_code=404, detail="Run not found")
-        if response.status_code == 409:
-            detail = response.json().get("detail")
-            span.set_status(Status(StatusCode.ERROR, str(detail)))
-            raise HTTPException(status_code=409, detail=detail)
+        if upstream.status_code >= 400:
+            detail = upstream_detail(upstream, "Orchestrator rejected the approval")
+            span.set_status(Status(StatusCode.ERROR, detail))
+            raise HTTPException(status_code=upstream.status_code, detail=detail)
 
-        response.raise_for_status()
-        payload = response.json()
+        payload = upstream.json()
         span.set_attributes(
             clean_attributes(
                 {

@@ -2,8 +2,13 @@
 
 This repo is a runnable local sample of an enterprise AI agent gateway. It shows
 how a browser client can authenticate with Keycloak, call an agent gateway, route
-work through an orchestrator, publish tool events through Kafka, and read data
-through guarded database sources.
+work through an orchestrator to standalone agent services, publish tool events
+through Kafka, and read data through guarded database sources.
+
+Agents are separate services, one per agent, discovered by the orchestrator
+through a standard agent card. Adding an agent to the platform is configuration
+only — no orchestrator code changes. See `docs/agent-services.md` for the
+multi-agent design and integration contract.
 
 The local demo has two database sources:
 
@@ -45,13 +50,14 @@ Recommended first run:
 Watch the backend while testing:
 
 ```bash
-docker compose logs -f gateway orchestrator sql-worker report-worker db-access
+docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker db-access
 ```
 
 ## What Is Included
 
-- `apps/gateway`: validates Keycloak JWTs, checks agent access through Casbin, derives source permissions, and forwards trusted context headers.
-- `apps/orchestrator`: runs LangGraph workflows, enforces Casbin source/tool policy before dispatch, plans actions with LiteLLM when configured, emits Kafka events, tracks run status, and records approvals.
+- `apps/gateway`: the edge policy-enforcement point. Validates Keycloak JWTs, checks agent access through Casbin, derives source permissions, and forwards trusted context headers. Adds per-user rate limiting, `Idempotency-Key` replay protection, input guards, a circuit-breaker-backed orchestrator client with clean 502/503/504 mapping, request-id correlation, and `/healthz` / `/readyz` endpoints. See `docs/gateway-design.md` for the full design.
+- `apps/orchestrator`: routes runs to external agent services through an agent registry, enforces Casbin source/tool policy on every agent decision before dispatch, emits Kafka events, tracks run status, and records approvals. Agents are declared in `AGENT_SERVICES` and discovered through their agent cards.
+- `apps/agents`: standalone agent services built on a shared runtime (`apps/agents/runtime.py`). Each agent runs its own LangGraph workflow and LiteLLM planner, exposes `/.well-known/agent-card` and `POST /runs`, and returns a decision; it never touches Kafka or databases directly. `apps/agents/world` and `apps/agents/procurement` are the two current agents. See `docs/agent-services.md`.
 - `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
 - `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events.
 - `apps/db_access`: validates read-only SQL, allowlists tables per database source, sets tenant/user session context, and limits returned rows.
@@ -87,15 +93,18 @@ flowchart TD
     end
 
     subgraph edge["Gateway access checks"]
-        gateway["Gateway API<br/>JWT validation<br/>Casbin agent invoke check"]
+        gateway["Gateway API<br/>JWT validation<br/>Casbin agent invoke check<br/>rate limit + idempotency<br/>circuit breaker to orchestrator"]
         allowed_permissions["Trusted policy context<br/>x-policy-subjects<br/>x-allowed-permissions"]
     end
 
-    subgraph agents["Orchestrator agents"]
-        orchestrator["Orchestrator API<br/>LangGraph workflows<br/>Casbin tool/source checks<br/>LiteLLM planning<br/>Human approval state"]
-        world_agent["world-agent<br/>tools: sql, report, approval<br/>requires: world-db"]
-        procurement_agent["procurement-agent<br/>tools: sql, approval<br/>requires: procurement-db"]
+    subgraph orchestration["Orchestration and policy"]
+        orchestrator["Orchestrator API<br/>agent registry + agent cards<br/>Casbin tool/source checks on decisions<br/>Kafka dispatch + run state<br/>Human approval state"]
         denied["Denied run<br/>permission/tool audit event"]
+    end
+
+    subgraph agents["Agent services (one service per agent)"]
+        world_agent["world-agent :8004<br/>LangGraph + LiteLLM planner<br/>actions: sql, report, approval<br/>requires: world-db"]
+        procurement_agent["procurement-agent :8005<br/>LangGraph + LiteLLM planner<br/>actions: sql, approval<br/>requires: procurement-db"]
     end
 
     subgraph tools["Tool execution"]
@@ -137,12 +146,11 @@ flowchart TD
     gateway --> allowed_permissions
     gateway -->|"Trusted context"| orchestrator
     allowed_permissions -->|"Casbin subjects + source context"| orchestrator
-    orchestrator --> world_agent
-    orchestrator --> procurement_agent
-    world_agent -->|"allowed: world-db"| kafka
-    procurement_agent -->|"allowed: procurement-db"| kafka
-    world_agent -->|"missing permission"| denied
-    procurement_agent -->|"missing permission"| denied
+    orchestrator -->|"POST /runs (agent card discovery)"| world_agent
+    orchestrator -->|"POST /runs (agent card discovery)"| procurement_agent
+    world_agent -->|"decision: tool/approval"| orchestrator
+    procurement_agent -->|"decision: tool/approval"| orchestrator
+    orchestrator -->|"missing permission/tool"| denied
     orchestrator -->|"Tool request events"| kafka
     kafka -->|"Consume"| workers
     workers -->|"SQL tool calls /query"| db_query
@@ -162,7 +170,11 @@ flowchart TD
     gateway -->|"Run status"| orchestrator
     gateway -. "traces + metrics" .-> collector
     orchestrator -. "traces + metrics" .-> collector
-    orchestrator -. "agent + generation + tool" .-> langfuse
+    world_agent -. "traces + metrics" .-> collector
+    procurement_agent -. "traces + metrics" .-> collector
+    orchestrator -. "agent-run root + tool spans" .-> langfuse
+    world_agent -. "planner generations" .-> langfuse
+    procurement_agent -. "planner generations" .-> langfuse
     workers -. "traces + metrics" .-> collector
     db_query -. "traces + metrics" .-> collector
     collector -->|"traces"| tempo
@@ -178,8 +190,8 @@ flowchart TD
 | Keycloak roles | Which persona subjects appear in the JWT | `role:world-analyst`, `role:procurement-analyst`, `role:source-auditor`, `role:data-admin` |
 | Casbin policy | Which subjects can use which agent, tool, or source object | `agent:world-agent` `invoke`; `datasource:world-db` `read`; `tool:sql` `execute` |
 | Gateway | Whether the user can invoke the requested agent, and which policy subjects are forwarded | `x-policy-subjects`, `x-allowed-permissions: world-db,procurement-db` |
-| Orchestrator agent | Which workflow and tool path runs | `world-agent` can use SQL, report, or approval; `procurement-agent` can use SQL or approval |
-| Source/tool policy check | Whether a tool request is emitted or denied | World data needs `datasource:world-db`; procurement data needs `datasource:procurement-db`; missing access emits an audit event |
+| Agent service | Which workflow action and tool the run should use (a decision, no side effects) | `world-agent` can plan SQL, report, or approval; `procurement-agent` can plan SQL or approval |
+| Orchestrator policy check | Whether the agent's decision is executed or denied | World data needs `datasource:world-db`; procurement data needs `datasource:procurement-db`; missing access emits an audit event |
 
 ## Local Services
 
@@ -188,7 +200,9 @@ flowchart TD
 | Keycloak | `http://localhost:8080` | Local OIDC issuer and seeded users |
 | Gateway | `http://localhost:8000` | Public API and test console |
 | Test console | `http://localhost:8000/ui` | Browser UI for end-to-end testing |
-| Orchestrator | `http://localhost:8001` | Internal workflow API |
+| Orchestrator | `http://localhost:8001` | Internal run routing, policy enforcement, and run state API |
+| World agent | `http://localhost:8004` | Standalone world-agent service (`/.well-known/agent-card`) |
+| Procurement agent | `http://localhost:8005` | Standalone procurement-agent service (`/.well-known/agent-card`) |
 | DB access | `http://localhost:8003` | Guarded SQL proxy |
 | Kafka | `localhost:29092` | Host-visible Kafka listener |
 | Postgres | `localhost:5432` | World DB plus seeded `procurement_db` |
@@ -251,15 +265,75 @@ duplicated in Keycloak; it lives in Casbin policy.
 The Casbin model lives in `policy/casbin_model.conf`, and default policies live
 in `policy/casbin_policy.csv`. The gateway evaluates agent invocation and
 forwards `x-policy-subjects` plus `x-allowed-permissions`; the orchestrator uses
-those subjects to evaluate source and tool policy before emitting a
-`tool.requested` event.
+those subjects to evaluate source and tool policy on the agent's decision
+before emitting a `tool.requested` event. Agent services only propose actions —
+they cannot bypass policy because all side effects run through the
+orchestrator.
 
 Workflow behavior:
 
-- `world-agent` can route to `sql`, `report`, or `approval`.
-- `procurement-agent` can route to `sql` or `approval`.
-- LiteLLM planning is used when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
+- `world-agent` (own service, port 8004) can plan `sql`, `report`, or `approval`.
+- `procurement-agent` (own service, port 8005) can plan `sql` or `approval`.
+- Each agent service plans with LiteLLM when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
 - Deterministic fallback routing is used when LiteLLM is not configured or the model call fails.
+
+### Adding A New Agent
+
+Agents integrate through configuration, not orchestrator code changes:
+
+1. Define the agent in its own module with an `AgentDefinition` (identity,
+   workflow, allowed actions, fallback routing, and a `decide` function) and
+   build it with `create_agent_app` from `apps/agents/runtime.py` — or
+   implement the same HTTP contract in any language.
+2. Run it as its own service (own container, own port, own scaling).
+3. Register it with the orchestrator by appending `agent-id=base-url` to
+   `AGENT_SERVICES`; the orchestrator discovers its workflow and capabilities
+   from `/.well-known/agent-card`.
+4. Grant access in Casbin: `agent:{agent-id}` `invoke` for users, plus any
+   `datasource:*` / `tool:*` rules the agent's decisions require.
+
+The full contract (agent card, run request, decision shape, trace
+propagation) is documented in `docs/agent-services.md`.
+
+## Gateway Behaviors
+
+`apps/gateway` is the only public entry point and applies these controls in
+order (full design in `docs/gateway-design.md`):
+
+1. Request correlation: a valid inbound `x-request-id` is honored, otherwise
+   one is generated; it is echoed on every response and becomes the `run_id`.
+2. JWT validation with clean failures: bad tokens return `401` with
+   `WWW-Authenticate`, an unreachable JWKS endpoint returns `503`.
+3. Input guards: empty messages and messages over `GATEWAY_MAX_MESSAGE_CHARS`
+   return `422` before any quota or policy work.
+4. Rate limiting on run creation only: a token bucket per `tenant:user`
+   returns `429` with `Retry-After` when exhausted. Polling is unmetered.
+5. Idempotent run creation: send an `Idempotency-Key` header to make retries
+   safe. Replays return the original response with `x-idempotent-replay: true`;
+   reusing a key with a different payload returns `409`.
+6. Casbin agent invoke check, then trusted context forwarding (unchanged).
+7. Resilient upstream calls: one pooled HTTP client plus a circuit breaker.
+   While the orchestrator is down the gateway fails fast with `503` and
+   `Retry-After`; timeouts map to `504`, unreachable/5xx to `502`.
+8. Health endpoints: `/healthz` (liveness) and `/readyz` (checks the
+   orchestrator through the breaker).
+
+Retry a run safely:
+
+```bash
+curl -sS -X POST http://localhost:8000/agents/world-agent/runs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: demo-key-1" \
+  -d '{"message":"show the largest cities by population with country context"}'
+```
+
+Gateway tunables (defaults shown in `.env.example`): `GATEWAY_RATE_LIMIT_ENABLED`,
+`GATEWAY_RUN_RATE_PER_MINUTE`, `GATEWAY_RUN_RATE_BURST`,
+`GATEWAY_MAX_MESSAGE_CHARS`, `GATEWAY_IDEMPOTENCY_TTL_SECONDS`,
+`GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS`, `GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS`,
+`GATEWAY_BREAKER_FAILURE_THRESHOLD`, `GATEWAY_BREAKER_RESET_SECONDS`,
+`GATEWAY_JWT_LEEWAY_SECONDS`.
 
 ## Observability Monitoring
 
@@ -283,10 +357,12 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 
 Langfuse LLM tracking uses a dedicated OpenTelemetry tracer. This Compose stack
 runs a self-hosted Langfuse UI at `http://localhost:3001`. The orchestrator
-sends a logical AI trace containing the `agent-run` root, the
-`orchestrator.llm_plan` generation, and the selected tool execution with its
-input, result, and final run output. The Langfuse trace carries the same trace
-ID as Tempo plus filterable request, tenant, agent, and workflow metadata.
+owns the logical `agent-run` root span and the selected tool execution with its
+input, result, and final run output; each agent service emits its
+`agent.llm_plan` planner generation under that same root by joining the
+Langfuse trace context propagated in the `x-langfuse-traceparent` header. The
+Langfuse trace carries the same trace ID as Tempo plus filterable request,
+tenant, agent, and workflow metadata.
 Gateway HTTP, JWT, polling, worker internals, database spans, and other
 infrastructure details remain only in Tempo, avoiding complete-trace
 duplication while preserving model, input, output, and usage analytics in
@@ -314,7 +390,8 @@ After running an agent, open `http://localhost:3000` for Grafana
 (`admin` / `admin`). Grafana starts with `Tempo`, `Prometheus`, and `Loki`
 datasources already provisioned.
 Search services such as
-`gateway`, `orchestrator`, `sql-worker`, `report-worker`, and `db-access`.
+`gateway`, `orchestrator`, `world-agent`, `procurement-agent`, `sql-worker`,
+`report-worker`, and `db-access`.
 Tempo is an API-backed trace store in this stack, so the browser UI for Tempo
 traces is Grafana Explore, not `http://localhost:3200/`.
 
@@ -326,8 +403,10 @@ the `Loki` datasource (`uid: loki`) and filter by labels such as
 Useful spans include:
 
 - `gateway.agent_call`: user request, agent authorization, orchestrator response.
-- `orchestrator.agent_run`: trusted request handling and LangGraph invocation.
-- `orchestrator.choose_plan_action`: LiteLLM or fallback routing decision.
+- `orchestrator.agent_run`: trusted request handling and decision execution.
+- `orchestrator.agent_invoke`: the HTTP call to the selected agent service.
+- `agent.plan.world` / `agent.plan.procurement`: the agent service's planning step.
+- `agent.choose_plan_action`: LiteLLM or fallback routing decision inside the agent.
 - `kafka.publish`: `agent.requested`, `tool.requested`, `tool.completed`, or `audit.events` emission.
 - `worker.sql_tool` and `worker.report_tool`: existing tool execution steps.
 - `db_access.validate_sql` and `db_access.execute_sql`: SQL guard and database read.
@@ -508,8 +587,8 @@ Expected denial:
 
 ## LiteLLM Planning
 
-The orchestrator calls an OpenAI-compatible LiteLLM chat completions endpoint for
-request planning when these variables are configured:
+Each agent service calls an OpenAI-compatible LiteLLM chat completions endpoint
+for request planning when these variables are configured:
 
 ```bash
 LITELLM_BASE_URL=http://localhost:4000/v1
@@ -543,6 +622,8 @@ Run services in separate terminals after exporting environment variables from
 ```bash
 uvicorn apps.gateway.main:app --host 0.0.0.0 --port 8000
 uvicorn apps.orchestrator.main:app --host 0.0.0.0 --port 8001
+uvicorn apps.agents.world.main:app --host 0.0.0.0 --port 8004
+uvicorn apps.agents.procurement.main:app --host 0.0.0.0 --port 8005
 uvicorn apps.db_access.main:app --host 0.0.0.0 --port 8003
 python -m apps.workers.sql_worker
 python -m apps.workers.report_worker
@@ -555,7 +636,7 @@ Kafka, Keycloak, and Postgres are still required for the full flow.
 Rebuild app containers after code changes:
 
 ```bash
-docker compose up --build -d gateway orchestrator db-access sql-worker report-worker
+docker compose up --build -d gateway orchestrator world-agent procurement-agent db-access sql-worker report-worker
 ```
 
 Restart everything:
@@ -591,7 +672,7 @@ docker compose up --force-recreate procurement-db-init
 Follow useful logs:
 
 ```bash
-docker compose logs -f gateway orchestrator sql-worker report-worker db-access langfuse-web langfuse-worker postgres procurement-db-init
+docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker db-access langfuse-web langfuse-worker postgres procurement-db-init
 ```
 
 If you edit `docker/keycloak/ptvn-realm.json` after Keycloak has already imported
