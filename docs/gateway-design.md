@@ -3,7 +3,8 @@
 This document describes the design of `apps/gateway`, the single public entry
 point of the stack. The gateway is the edge policy-enforcement point: every
 agent run, status poll, and approval passes through it, and nothing behind it
-(orchestrator, workers, db-access) is exposed to clients.
+(orchestrator, agent services, workers, per-agent data planes) is exposed to
+clients.
 
 ## Goals
 
@@ -19,8 +20,9 @@ agent run, status poll, and approval passes through it, and nothing behind it
 ## Non-goals
 
 - The gateway does not run workflows, evaluate tool/source policy for
-  dispatch, or touch databases. Those checks stay in the orchestrator and
-  db-access layers so a compromised or buggy gateway cannot widen data access.
+  dispatch, or touch databases. Those checks stay in the orchestrator and the
+  per-agent data planes so a compromised or buggy gateway cannot widen data
+  access.
 - Multi-replica coordination. Traffic state is in-memory by design in this
   sample; the interfaces are shaped so a shared store can replace them.
 

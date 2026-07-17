@@ -50,7 +50,7 @@ Recommended first run:
 Watch the backend while testing:
 
 ```bash
-docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker db-access
+docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker world-db-access procurement-db-access
 ```
 
 ## What Is Included
@@ -59,9 +59,9 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent sql-wo
 - `apps/orchestrator`: routes runs to external agent services through an agent registry, enforces Casbin source/tool policy on every agent decision before dispatch, emits Kafka events, tracks run status, and records approvals. Agents are declared in `AGENT_SERVICES` and discovered through their agent cards.
 - `apps/agents`: standalone agent services built on a shared runtime (`apps/agents/runtime.py`). Each agent runs its own LangGraph workflow and LiteLLM planner, exposes `/.well-known/agent-card` and `POST /runs`, and returns a decision; it never touches Kafka or databases directly. `apps/agents/world` and `apps/agents/procurement` are the two current agents. See `docs/agent-services.md`.
 - `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
-- `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events.
-- `apps/db_access`: validates read-only SQL, allowlists tables per database source, sets tenant/user session context, and limits returned rows.
-- `apps/observability.py`: configures OpenTelemetry traces and metrics for the existing gateway, orchestrator, worker, and DB-access steps.
+- `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events. The SQL worker routes each query to the data plane that owns its database, using the `DATA_PLANES` registry.
+- `apps/data_access`: per-agent database access layers built on a shared runtime (`apps/data_access/runtime.py`). Each plane holds credentials for only its own database and enforces the final read-only, table-allowlisted, tenant-scoped SQL guard. `apps/data_access/world` (`world-db-access`) and `apps/data_access/procurement` (`procurement-db-access`) are the two current planes.
+- `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
 - `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, SQL response rendering, agent input/output, and human approval.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
 - `docker/otel/collector-config.yaml`: local OTLP collector pipeline that forwards traces to Tempo and exposes metrics for Prometheus.
@@ -76,8 +76,8 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent sql-wo
 
 This view shows the service path and the access model together. Keycloak issues
 coarse persona roles, Casbin maps those role subjects to agent, tool, and
-data-source objects, and `apps/db_access` enforces the final guarded SQL
-boundary before either database is read.
+data-source objects, and each agent's own data plane (`apps/data_access`)
+enforces the final guarded SQL boundary before its database is read.
 OpenTelemetry spans and metrics are emitted by the existing services and
 forwarded through the local collector to Tempo and Prometheus. Compose container
 logs are shipped to Loki. No extra agent or tool path is added.
@@ -112,13 +112,11 @@ flowchart TD
         workers["Workers<br/>SQL worker<br/>Report worker"]
     end
 
-    subgraph db_layer["Database access layer<br/>apps/db_access"]
-        db_query["POST /query<br/>body: database + sql<br/>headers: x-tenant-id, x-user-id"]
-        sql_guard["SQL guard<br/>parse with sqlglot<br/>one read-only SELECT only"]
-        source_router{"Logical database<br/>world or procurement"}
-        world_policy["World source policy<br/>allow: city, country,<br/>country_language, country_flag<br/>max rows: 500"]
-        procurement_policy["Procurement source policy<br/>allow: suppliers, purchase_orders,<br/>supplier_summary<br/>max rows: 500"]
-        blocked_query["Blocked by DB access<br/>write SQL, multi statement,<br/>unknown DB, or disallowed table"]
+    subgraph db_layer["Per-agent data planes (one per agent)<br/>apps/data_access"]
+        plane_router{"DATA_PLANES route<br/>by database name"}
+        world_plane["world-db-access :8006<br/>SQL guard: one read-only SELECT<br/>allow: city, country,<br/>country_language, country_flag<br/>max rows: 500<br/>holds only WORLD_DATABASE_URL"]
+        procurement_plane["procurement-db-access :8007<br/>SQL guard: one read-only SELECT<br/>allow: suppliers, purchase_orders,<br/>supplier_summary<br/>max rows: 500<br/>holds only PROCUREMENT_DATABASE_URL"]
+        blocked_query["Blocked by data plane<br/>write SQL, multi statement,<br/>foreign DB, or disallowed table"]
     end
 
     subgraph sources["Database sources"]
@@ -153,17 +151,14 @@ flowchart TD
     orchestrator -->|"missing permission/tool"| denied
     orchestrator -->|"Tool request events"| kafka
     kafka -->|"Consume"| workers
-    workers -->|"SQL tool calls /query"| db_query
-    db_query --> sql_guard
-    sql_guard -->|"valid SELECT"| source_router
-    sql_guard -->|"invalid SQL"| blocked_query
-    source_router -->|"database: world"| world_policy
-    source_router -->|"database: procurement"| procurement_policy
-    source_router -->|"unknown database"| blocked_query
-    world_policy -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| worlddb
-    procurement_policy -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| procurementdb
-    world_policy -->|"table not allowlisted"| blocked_query
-    procurement_policy -->|"table not allowlisted"| blocked_query
+    workers -->|"SQL tool routes to owning plane"| plane_router
+    plane_router -->|"database: world → POST /query"| world_plane
+    plane_router -->|"database: procurement → POST /query"| procurement_plane
+    plane_router -->|"no plane for database"| blocked_query
+    world_plane -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| worlddb
+    procurement_plane -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| procurementdb
+    world_plane -->|"invalid SQL, foreign or<br/>disallowed table"| blocked_query
+    procurement_plane -->|"invalid SQL, foreign or<br/>disallowed table"| blocked_query
     workers -->|"Tool result events"| kafka
     kafka -->|"Resume run status"| orchestrator
     frontend -->|"Poll /runs/{run_id}"| gateway
@@ -176,7 +171,8 @@ flowchart TD
     world_agent -. "planner generations" .-> langfuse
     procurement_agent -. "planner generations" .-> langfuse
     workers -. "traces + metrics" .-> collector
-    db_query -. "traces + metrics" .-> collector
+    world_plane -. "traces + metrics" .-> collector
+    procurement_plane -. "traces + metrics" .-> collector
     collector -->|"traces"| tempo
     prometheus -->|"scrapes metrics"| collector
     promtail -->|"pushes logs"| loki
@@ -192,6 +188,7 @@ flowchart TD
 | Gateway | Whether the user can invoke the requested agent, and which policy subjects are forwarded | `x-policy-subjects`, `x-allowed-permissions: world-db,procurement-db` |
 | Agent service | Which workflow action and tool the run should use (a decision, no side effects) | `world-agent` can plan SQL, report, or approval; `procurement-agent` can plan SQL or approval |
 | Orchestrator policy check | Whether the agent's decision is executed or denied | World data needs `datasource:world-db`; procurement data needs `datasource:procurement-db`; missing access emits an audit event |
+| Agent data plane | The last-mile SQL guard against that agent's own database | `world-db-access` allows read-only SELECTs over world tables only; `procurement-db-access` the same for procurement; each holds only its own credentials |
 
 ## Local Services
 
@@ -203,7 +200,8 @@ flowchart TD
 | Orchestrator | `http://localhost:8001` | Internal run routing, policy enforcement, and run state API |
 | World agent | `http://localhost:8004` | Standalone world-agent service (`/.well-known/agent-card`) |
 | Procurement agent | `http://localhost:8005` | Standalone procurement-agent service (`/.well-known/agent-card`) |
-| DB access | `http://localhost:8003` | Guarded SQL proxy |
+| World data plane | `http://localhost:8006` | `world-db-access`: guarded SQL over the world database only |
+| Procurement data plane | `http://localhost:8007` | `procurement-db-access`: guarded SQL over the procurement database only |
 | Kafka | `localhost:29092` | Host-visible Kafka listener |
 | Postgres | `localhost:5432` | World DB plus seeded `procurement_db` |
 | OTLP collector | `localhost:4317`, `localhost:4318`, `localhost:9464` | Receives OpenTelemetry traces and metrics; exposes Prometheus scrape output |
@@ -391,7 +389,7 @@ After running an agent, open `http://localhost:3000` for Grafana
 datasources already provisioned.
 Search services such as
 `gateway`, `orchestrator`, `world-agent`, `procurement-agent`, `sql-worker`,
-`report-worker`, and `db-access`.
+`report-worker`, `world-db-access`, and `procurement-db-access`.
 Tempo is an API-backed trace store in this stack, so the browser UI for Tempo
 traces is Grafana Explore, not `http://localhost:3200/`.
 
@@ -409,7 +407,7 @@ Useful spans include:
 - `agent.choose_plan_action`: LiteLLM or fallback routing decision inside the agent.
 - `kafka.publish`: `agent.requested`, `tool.requested`, `tool.completed`, or `audit.events` emission.
 - `worker.sql_tool` and `worker.report_tool`: existing tool execution steps.
-- `db_access.validate_sql` and `db_access.execute_sql`: SQL guard and database read.
+- `data_access.query`, `data_access.validate_sql`, and `data_access.execute_sql`: the owning data plane's SQL guard and database read.
 - `gateway.run_status_response`: the user-facing poll that returns the final run result.
 
 Trace context is carried across HTTP automatically and across Kafka in the event
@@ -421,17 +419,24 @@ Loki with Compose labels, including the `service` label.
 
 ## Database Access Layer
 
-`apps/db_access` is a small FastAPI service that sits behind the SQL worker. In
-the full agent flow, the gateway first checks `agent:{agent_id}` `invoke`
+Each agent owns a dedicated data plane — a small FastAPI service built on
+`apps/data_access/runtime.py` that holds credentials for **only** its own
+database. `world-db-access` (:8006) can reach the world database and
+`procurement-db-access` (:8007) the procurement database; neither can touch the
+other's data. This is the least-privilege, credential-isolated version of a
+data-access layer.
+
+In the full agent flow, the gateway first checks `agent:{agent_id}` `invoke`
 through Casbin, the orchestrator checks the run's data-source and tool policy,
-and only then does the SQL worker call `POST /query` on `db-access`.
+and only then does the SQL worker route `POST /query` to the plane that owns the
+database (via the `DATA_PLANES` registry).
 
-The access layer's job is the database boundary:
+Each plane's job is the database boundary:
 
-1. Pick the logical database from the request body.
+1. Refuse any request whose `database` is not the one this plane serves (`404`).
 2. Parse SQL with `sqlglot`.
 3. Allow exactly one read-only `SELECT` statement.
-4. Reject table names outside that source's allowlist.
+4. Reject table names outside that plane's allowlist.
 5. Set `app.tenant_id` and `app.user_id` in the Postgres session.
 6. Wrap the query with a max row limit before returning rows.
 
@@ -459,21 +464,27 @@ Response shape:
 }
 ```
 
-Compose points the two logical sources at different databases:
+Compose gives each plane only its own database URL, and the SQL worker learns
+where to route each query from `DATA_PLANES`:
 
 ```bash
-DATABASE_URL=postgresql://world:world123@postgres:5432/world-db
+# world-db-access service only
 WORLD_DATABASE_URL=postgresql://world:world123@postgres:5432/world-db
+# procurement-db-access service only
 PROCUREMENT_DATABASE_URL=postgresql://world:world123@postgres:5432/procurement_db
+# sql-worker only (database=base-url routing)
+DATA_PLANES=world=http://world-db-access:8006,procurement=http://procurement-db-access:8007
 ```
 
-| Logical database | Source permission | Env var | Allowed tables | Max rows |
-| --- | --- | --- | --- | --- |
-| `world` | `world-db` | `WORLD_DATABASE_URL` or `DATABASE_URL` | `city`, `country`, `country_language`, `country_flag` | 500 |
-| `procurement` | `procurement-db` | `PROCUREMENT_DATABASE_URL` | `suppliers`, `purchase_orders`, `supplier_summary` | 500 |
+| Plane | Source permission | Owns database | Env var | Allowed tables | Max rows |
+| --- | --- | --- | --- | --- | --- |
+| `world-db-access` | `world-db` | `world` | `WORLD_DATABASE_URL` or `DATABASE_URL` | `city`, `country`, `country_language`, `country_flag` | 500 |
+| `procurement-db-access` | `procurement-db` | `procurement` | `PROCUREMENT_DATABASE_URL` | `suppliers`, `purchase_orders`, `supplier_summary` | 500 |
 
-Unknown logical database names return `404`. Missing configured database URLs
-return `503`. Invalid SQL returns `400`, and disallowed tables return `403`.
+A request for a database the plane does not own returns `404`. A missing
+database URL returns `503`. Invalid SQL returns `400`, and disallowed tables
+return `403`. If no plane is registered for a database, the SQL worker fails the
+run rather than routing the query elsewhere.
 
 ## API Smoke Tests
 
@@ -624,7 +635,8 @@ uvicorn apps.gateway.main:app --host 0.0.0.0 --port 8000
 uvicorn apps.orchestrator.main:app --host 0.0.0.0 --port 8001
 uvicorn apps.agents.world.main:app --host 0.0.0.0 --port 8004
 uvicorn apps.agents.procurement.main:app --host 0.0.0.0 --port 8005
-uvicorn apps.db_access.main:app --host 0.0.0.0 --port 8003
+uvicorn apps.data_access.world.main:app --host 0.0.0.0 --port 8006
+uvicorn apps.data_access.procurement.main:app --host 0.0.0.0 --port 8007
 python -m apps.workers.sql_worker
 python -m apps.workers.report_worker
 ```
@@ -636,7 +648,7 @@ Kafka, Keycloak, and Postgres are still required for the full flow.
 Rebuild app containers after code changes:
 
 ```bash
-docker compose up --build -d gateway orchestrator world-agent procurement-agent db-access sql-worker report-worker
+docker compose up --build -d gateway orchestrator world-agent procurement-agent world-db-access procurement-db-access sql-worker report-worker
 ```
 
 Restart everything:
@@ -672,7 +684,7 @@ docker compose up --force-recreate procurement-db-init
 Follow useful logs:
 
 ```bash
-docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker db-access langfuse-web langfuse-worker postgres procurement-db-init
+docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker world-db-access procurement-db-access langfuse-web langfuse-worker postgres procurement-db-init
 ```
 
 If you edit `docker/keycloak/ptvn-realm.json` after Keycloak has already imported

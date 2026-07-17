@@ -13,7 +13,6 @@ x-app-env: &app-env
   KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-agent-frontend}
   KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/ptvn/protocol/openid-connect/certs}
   ORCH_URL: http://orchestrator:8001
-  DB_PROXY_URL: http://db-access:8003
   KAFKA_BOOTSTRAP: kafka:9092
   LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
   LITELLM_MODEL: ${LITELLM_MODEL:-}
@@ -32,9 +31,6 @@ x-app-env: &app-env
   PROMETHEUS_URL: ${PROMETHEUS_URL:-http://localhost:9090}
   LOKI_UI_URL: ${LOKI_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bservice%3D%5C%22gateway%5C%22%7D%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
   TEMPO_UI_URL: ${TEMPO_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
-  DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
-  WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
-  PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
 
 x-langfuse-env: &langfuse-env
   NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3001}
@@ -443,13 +439,42 @@ services:
       retries: 5
       start_period: 15s
 
-  db-access:
+  # Per-agent data planes. Each holds credentials for ONLY its own database,
+  # so a fault in one cannot reach the other's data.
+  world-db-access:
     <<: *app
-    command: uvicorn apps.db_access.main:app --host 0.0.0.0 --port 8003
+    command: uvicorn apps.data_access.world.main:app --host 0.0.0.0 --port 8006
     environment:
       <<: *app-env
+      # Container-internal host. Hard-coded (not from .env) because .env values
+      # target host-based dev (localhost); inside Compose the DB is `postgres`.
+      WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
     ports:
-      - "8003:8003"
+      - "8006:8006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8006/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procurement-db-access:
+    <<: *app
+    command: uvicorn apps.data_access.procurement.main:app --host 0.0.0.0 --port 8007
+    environment:
+      <<: *app-env
+      # Container-internal host. Hard-coded (not from .env) because .env values
+      # target host-based dev (localhost); inside Compose the DB is `postgres`.
+      PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
+    ports:
+      - "8007:8007"
     depends_on:
       postgres:
         condition: service_healthy
@@ -460,7 +485,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8007/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5
@@ -471,10 +496,13 @@ services:
     command: python -m apps.workers.sql_worker
     environment:
       <<: *app-env
+      DATA_PLANES: ${DATA_PLANES:-world=http://world-db-access:8006,procurement=http://procurement-db-access:8007}
     depends_on:
       kafka:
         condition: service_healthy
-      db-access:
+      world-db-access:
+        condition: service_healthy
+      procurement-db-access:
         condition: service_healthy
       otel-collector:
         condition: service_started

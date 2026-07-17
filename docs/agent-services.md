@@ -30,9 +30,16 @@ flowchart LR
     world -->|"AgentDecision"| orchestrator
     procurement -->|"AgentDecision"| orchestrator
     orchestrator -->|"tool.requested / audit.events"| kafka["Kafka"]
-    kafka --> workers["Tool workers"]
+    kafka --> workers["Tool workers<br/>route by database"]
+    workers -->|"POST /query"| worldplane["world-db-access :8006<br/>world credentials only"]
+    workers -->|"POST /query"| procplane["procurement-db-access :8007<br/>procurement credentials only"]
     workers -->|"tool.completed"| kafka --> orchestrator
 ```
+
+Each agent is a vertical slice: a credential-free planner service (world-agent,
+procurement-agent) paired with a data plane that holds credentials for only its
+own database (world-db-access, procurement-db-access). The orchestrator is the
+shared control plane above both.
 
 The run lifecycle:
 
@@ -45,7 +52,10 @@ The run lifecycle:
    an `AgentDecision` — it performs no side effects.
 5. The orchestrator enforces Casbin policy on the decision, then either
    publishes `tool.requested`, records `requires_approval`, or denies with an
-   audit event. Tool completion still flows back through Kafka.
+   audit event.
+6. For a SQL tool, the worker routes `POST /query` to the data plane that owns
+   the requested database (via `DATA_PLANES`); that plane runs the final SQL
+   guard against its own database. Tool completion flows back through Kafka.
 
 ## Agent registry
 
@@ -142,6 +152,49 @@ Response — the decision the orchestrator will enforce and execute:
 
 Liveness for compose/orchestration health checks.
 
+## Per-agent data planes
+
+Agents never hold database credentials. Instead each agent owns a data plane: a
+small service built on `apps/data_access/runtime.py` that holds credentials for
+**only** its own database and enforces the last-mile SQL guard. The two shipped
+planes are `world-db-access` (:8006) and `procurement-db-access` (:8007).
+
+The SQL worker owns no credentials either. It reads `DATA_PLANES`
+(`database=base-url` pairs, the same shape as `AGENT_SERVICES`) and routes each
+`tool.requested` SQL event to the plane that owns `tool_input.database`:
+
+```bash
+DATA_PLANES=world=http://world-db-access:8006,procurement=http://procurement-db-access:8007
+```
+
+If no plane owns the requested database, the worker fails the run rather than
+routing the query elsewhere.
+
+### `POST /query`
+
+Request body (plus trusted `x-tenant-id` / `x-user-id` headers):
+
+```json
+{"database": "world", "sql": "select name, population from city limit 3"}
+```
+
+Each plane:
+
+1. Refuses any request whose `database` is not the one it serves (`404`), so a
+   routing mistake cannot cross domains even before the SQL guard runs.
+2. Parses the SQL with `sqlglot` and allows exactly one read-only `SELECT`
+   (`400` otherwise).
+3. Rejects tables outside its allowlist (`403`).
+4. Sets `app.tenant_id` / `app.user_id` in the Postgres session (RLS) and wraps
+   the query with a row limit.
+
+A missing database URL returns `503`. The response is `{"rows": [...]}`.
+
+This is the credential-isolated version of a data-access layer: the world plane
+physically cannot reach the procurement database, and vice versa. It complements
+the orchestrator's Casbin check — the orchestrator decides *whether* a data
+source may be read; the data plane guarantees *how* it is read.
+
 ## Observability
 
 - Tempo: standard W3C `traceparent` propagation over HTTP keeps
@@ -164,8 +217,12 @@ Liveness for compose/orchestration health checks.
 3. Append `agent-id=base-url` to `AGENT_SERVICES` on the orchestrator.
 4. Add Casbin rules: `agent:<agent-id>` `invoke` for the intended roles, plus
    any `datasource:*` / `tool:*` rules its decisions require.
-5. If the agent needs a new tool, add a worker consuming `tool.requested` for
-   that tool; the orchestrator and gateway need no changes.
+5. If the agent reads a new database, add a data plane under
+   `apps/data_access/<name>/main.py` (an `AgentDataPlane` definition holding
+   only that database's URL env + table allowlist), run it as its own compose
+   service, and append `database=base-url` to `DATA_PLANES` on the SQL worker.
+6. If the agent needs a new non-SQL tool, add a worker consuming
+   `tool.requested` for that tool; the orchestrator and gateway need no changes.
 
 ## Production notes
 
@@ -178,3 +235,8 @@ Liveness for compose/orchestration health checks.
 - Agent services listen on the internal network only; nothing but the
   orchestrator should reach them, and they hold no Kafka or database
   credentials.
+- Data planes also listen on the internal network only; only the SQL worker
+  should reach them. Each holds credentials for a single database, so database
+  credentials no longer live in the shared app environment — they are scoped to
+  the one plane that needs them. Give each plane a distinct least-privilege
+  database role in production.

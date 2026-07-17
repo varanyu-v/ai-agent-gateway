@@ -7,6 +7,7 @@ import httpx
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from apps.data_access.runtime import parse_data_planes
 from apps.observability import (
     clean_attributes,
     inject_trace_context,
@@ -16,7 +17,10 @@ from apps.observability import (
 
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
-DB_PROXY_URL = os.getenv("DB_PROXY_URL", "http://localhost:8003")
+# Route each SQL tool to the data plane that owns its database. Each plane
+# holds credentials for only its own database, so the worker never needs any
+# database credentials itself.
+DATA_PLANES = parse_data_planes(os.getenv("DATA_PLANES", ""))
 tracer = setup_observability("sql-worker")
 
 
@@ -82,13 +86,29 @@ async def handle_sql_tool(
             },
         ),
     ) as span:
+        database = event.get("input", {}).get("database")
+        base_url = DATA_PLANES.get(database)
+        if base_url is None:
+            # No data plane owns this database. Fail the run explicitly rather
+            # than routing the query somewhere it does not belong.
+            status = "failed"
+            result = {"error": f"No data plane registered for database '{database}'"}
+            span.set_status(Status(StatusCode.ERROR, "No data plane for database"))
+            span.set_attributes(
+                clean_attributes(
+                    {"app.run_status": status, "app.database": database},
+                ),
+            )
+            await publish_completed(producer, event, status, result)
+            return
+
         headers = {
             "x-request-id": event["request_id"],
             "x-tenant-id": event["tenant_id"],
             "x-user-id": event["user_id"],
         }
 
-        async with httpx.AsyncClient(base_url=DB_PROXY_URL, timeout=60) as client:
+        async with httpx.AsyncClient(base_url=base_url, timeout=60) as client:
             response = await client.post("/query", json=event["input"], headers=headers)
 
         status = "completed" if response.status_code == 200 else "failed"
