@@ -736,6 +736,24 @@ async def apply_agent_decision(
             "denied_reason": decision.get("reason") or "Agent denied the request",
         }
 
+    if action == "final":
+        # The agent answered the message itself (chat/small-talk turns): the
+        # run completes now with the agent's text and no tool is dispatched.
+        await publish(
+            "audit.events",
+            {
+                **state,
+                "workflow": workflow,
+                "event": decision.get("audit_event") or "agent_final_answered",
+            },
+        )
+        output = str(decision.get("output") or "").strip()
+        return {
+            "needs_approval": False,
+            "denied_reason": None,
+            "final_output": output or "The agent has nothing further to add.",
+        }
+
     if action == "async":
         # The agent will drive this run itself through the tool-broker
         # callback API; every tool it requests is policy-checked there. Keep
@@ -1030,17 +1048,24 @@ async def run(
 
             result = await apply_agent_decision(state, workflow_name, decision)
 
+            final_output = result.get("final_output")
             if result.get("denied_reason"):
                 status = "denied"
             elif result["needs_approval"]:
                 status = "requires_approval"
+            elif final_output is not None:
+                status = "completed"
             else:
                 status = "running"
 
             denied_reason = result.get("denied_reason")
-            output = run_output_for_status(
-                status,
-                denied_reason=denied_reason,
+            output = (
+                final_output
+                if final_output is not None
+                else run_output_for_status(
+                    status,
+                    denied_reason=denied_reason,
+                )
             )
             if status == "denied":
                 span.set_status(Status(StatusCode.ERROR, denied_reason))

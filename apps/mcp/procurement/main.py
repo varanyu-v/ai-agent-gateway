@@ -17,6 +17,7 @@ from apps.mcp.runtime import (
     McpToolError,
     create_mcp_app,
     parse_limit_argument,
+    parse_sql_argument,
     query_data_plane,
 )
 
@@ -92,6 +93,21 @@ async def supplier_spend_summary(
     return {"rows": rows, "row_count": len(rows)}
 
 
+async def run_sql(
+    arguments: dict[str, Any],
+    context: McpToolContext,
+) -> dict[str, Any]:
+    """Run one planner-written SELECT under the procurement plane's guard."""
+    sql = parse_sql_argument(arguments)
+    rows = await query_data_plane(
+        context,
+        PROCUREMENT_DATA_PLANE_URL,
+        "procurement",
+        sql,
+    )
+    return {"rows": rows, "row_count": len(rows), "sql": sql}
+
+
 DEFINITION = McpServerDefinition(
     server_id="procurement-mcp",
     name="Procurement MCP Service",
@@ -155,6 +171,28 @@ DEFINITION = McpServerDefinition(
                 "additionalProperties": False,
             },
             handler=supplier_spend_summary,
+            required_permission="procurement-db",
+        ),
+        McpTool(
+            name="run_sql",
+            description=(
+                "Run one read-only SELECT over the procurement database "
+                "(tables: suppliers, purchase_orders, supplier_summary). The "
+                "data plane enforces the final SELECT-only, table-allowlisted, "
+                "row-capped guard."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "A single read-only SELECT statement.",
+                    },
+                },
+                "required": ["sql"],
+                "additionalProperties": False,
+            },
+            handler=run_sql,
             required_permission="procurement-db",
         ),
     ),

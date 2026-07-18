@@ -48,7 +48,7 @@ class McpContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(card["id"], "world-mcp")
         self.assertEqual(
             card["capabilities"]["tools"],
-            ["list_top_cities", "country_overview"],
+            ["list_top_cities", "country_overview", "run_sql"],
         )
         self.assertEqual(card["requirements"]["permissions"], ["world-db"])
         self.assertEqual(card["endpoints"]["mcp"], "/mcp")
@@ -75,7 +75,7 @@ class McpContractTests(unittest.IsolatedAsyncioTestCase):
         tools = response.json()["result"]["tools"]
         self.assertEqual(
             [tool["name"] for tool in tools],
-            ["list_recent_purchase_orders", "supplier_spend_summary"],
+            ["list_recent_purchase_orders", "supplier_spend_summary", "run_sql"],
         )
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
@@ -233,6 +233,69 @@ class McpToolExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("limit", bad_limit.json()["result"]["content"][0]["text"])
         self.assertTrue(bad_continent.json()["result"]["isError"])
         self.assertIn("Atlantis", bad_continent.json()["result"]["content"][0]["text"])
+        self.assertEqual(plane.requests, [])
+
+    async def test_run_sql_delegates_planned_select_to_world_plane(self) -> None:
+        plane = FakeDataPlane(rows=[{"name": "France"}])
+        app = runtime.create_mcp_app(
+            world_definition,
+            outbound_transport=httpx.MockTransport(plane.handler),
+        )
+        sql = "select name from country where code = 'FRA' limit 5"
+        async with mcp_client(app) as client:
+            response = await client.post(
+                "/mcp",
+                json=rpc("tools/call", {"name": "run_sql", "arguments": {"sql": sql}}),
+                headers=IDENTITY_HEADERS,
+            )
+
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(result["structuredContent"]["row_count"], 1)
+        self.assertEqual(result["structuredContent"]["sql"], sql)
+        self.assertEqual(plane.last_sql, sql)
+
+    async def test_run_sql_rejects_non_select_before_reaching_the_plane(self) -> None:
+        plane = FakeDataPlane()
+        app = runtime.create_mcp_app(
+            world_definition,
+            outbound_transport=httpx.MockTransport(plane.handler),
+        )
+        async with mcp_client(app) as client:
+            update = await client.post(
+                "/mcp",
+                json=rpc(
+                    "tools/call",
+                    {
+                        "name": "run_sql",
+                        "arguments": {"sql": "update city set population = 0"},
+                    },
+                ),
+                headers=IDENTITY_HEADERS,
+            )
+            multiple = await client.post(
+                "/mcp",
+                json=rpc(
+                    "tools/call",
+                    {
+                        "name": "run_sql",
+                        "arguments": {"sql": "select 1; select 2"},
+                    },
+                ),
+                headers=IDENTITY_HEADERS,
+            )
+            empty = await client.post(
+                "/mcp",
+                json=rpc("tools/call", {"name": "run_sql", "arguments": {}}),
+                headers=IDENTITY_HEADERS,
+            )
+
+        for response in (update, multiple, empty):
+            self.assertTrue(response.json()["result"]["isError"])
+        self.assertIn(
+            "read-only SELECT",
+            update.json()["result"]["content"][0]["text"],
+        )
         self.assertEqual(plane.requests, [])
 
     async def test_generate_report_queues_job_with_request_scoped_id(self) -> None:

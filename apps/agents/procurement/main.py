@@ -1,19 +1,69 @@
 """Procurement analyst agent service.
 
-Plans procurement-database runs: read-only data lookups or a human approval
-gate for destructive requests. Side effects are executed by the orchestrator
-after policy enforcement.
+Plans procurement-database runs: read-only data lookups, a human approval
+gate for destructive requests, or a direct chat reply for greetings and
+off-topic messages. Side effects are executed by the orchestrator after
+policy enforcement.
 
 Every executable decision names the `mcp` tool: the MCP worker routes the
-call to the procurement MCP server (`supplier_spend_summary` for both spend
-rankings and risk reviews), behind the `mcp:procurement-mcp` Casbin object
-plus the `procurement-db` datasource permission.
+call to the procurement MCP server, behind the `mcp:procurement-mcp` Casbin
+object plus the `procurement-db` datasource permission. The LLM planner may
+answer a data question with a purpose-built SELECT in `arguments.sql`,
+executed through procurement-mcp's `run_sql` tool under the procurement data
+plane's final SQL guard.
 """
 
-from apps.agents.runtime import AgentDecision, AgentDefinition, AgentRunRequest, create_agent_app
+from apps.agents.runtime import (
+    AgentDecision,
+    AgentDefinition,
+    AgentRunRequest,
+    PlannedAction,
+    create_agent_app,
+)
 
 
 RISK_LEVELS = ("high", "medium", "low")
+
+DATA_KEYWORDS = (
+    "procurement",
+    "supplier",
+    "suppliers",
+    "vendor",
+    "vendors",
+    "purchase",
+    "spend",
+    "order",
+    "orders",
+    "sourcing",
+    "rank",
+    "list",
+    "show",
+    "count",
+    "compare",
+    "data",
+    "sql",
+)
+
+CHAT_FALLBACK_REPLY = (
+    "Hello! I'm the procurement analyst agent. Ask me about suppliers, "
+    "purchase orders, spend, and risk — for example: 'rank suppliers by "
+    "total spend' or 'show recent blocked purchase orders'."
+)
+
+PLANNER_GUIDANCE = """
+Data actions for this agent:
+- "sql": read-only lookup over the procurement database. Put one PostgreSQL
+  SELECT statement in arguments.sql, using only these tables:
+    suppliers(supplier_id, supplier_name, category, country, risk_level)
+    purchase_orders(po_number, supplier_id, business_unit, order_date,
+                    status, total_amount)
+    supplier_summary(supplier_name, category, country, total_spend,
+                     order_count, risk_level, last_order_date)
+  Join purchase_orders.supplier_id = suppliers.supplier_id. Always end with
+  LIMIT (50 or less).
+- "risk": supplier spend summary for one risk level. Set
+  arguments.risk_level to "high", "medium", or "low".
+""".strip()
 
 
 def fallback_action(message: str) -> str:
@@ -22,7 +72,9 @@ def fallback_action(message: str) -> str:
         return "approval"
     if "risk" in text:
         return "risk"
-    return "sql"
+    if any(keyword in text for keyword in DATA_KEYWORDS):
+        return "sql"
+    return "chat"
 
 
 def extract_risk_level(message: str) -> str:
@@ -33,7 +85,18 @@ def extract_risk_level(message: str) -> str:
     return "high"
 
 
-def decide(action: str, request: AgentRunRequest) -> AgentDecision:
+def decide(planned: PlannedAction, request: AgentRunRequest) -> AgentDecision:
+    action = planned.action
+
+    if action == "chat":
+        return AgentDecision(
+            action="final",
+            workflow="procurement",
+            planner_action=action,
+            audit_event="agent_chat_answered",
+            output=planned.reply or CHAT_FALLBACK_REPLY,
+        )
+
     if action == "approval":
         return AgentDecision(
             action="approval",
@@ -43,6 +106,7 @@ def decide(action: str, request: AgentRunRequest) -> AgentDecision:
         )
 
     if action == "risk":
+        level = planned.arguments.get("risk_level")
         return AgentDecision(
             action="tool",
             workflow="procurement",
@@ -52,7 +116,26 @@ def decide(action: str, request: AgentRunRequest) -> AgentDecision:
             tool_input={
                 "server": "procurement-mcp",
                 "name": "supplier_spend_summary",
-                "arguments": {"risk_level": extract_risk_level(request.message)},
+                "arguments": {
+                    "risk_level": level
+                    if isinstance(level, str) and level in RISK_LEVELS
+                    else extract_risk_level(request.message),
+                },
+            },
+        )
+
+    planned_sql = planned.arguments.get("sql")
+    if isinstance(planned_sql, str) and planned_sql.strip():
+        return AgentDecision(
+            action="tool",
+            workflow="procurement",
+            planner_action="sql",
+            tool="mcp",
+            required_permission="procurement-db",
+            tool_input={
+                "server": "procurement-mcp",
+                "name": "run_sql",
+                "arguments": {"sql": planned_sql.strip()},
             },
         )
 
@@ -79,11 +162,12 @@ DEFINITION = AgentDefinition(
     ),
     version="1.0.0",
     workflow="procurement",
-    actions=frozenset({"sql", "risk", "approval"}),
+    actions=frozenset({"chat", "sql", "risk", "approval"}),
     required_permissions=("procurement-db",),
     tools=("mcp",),
     fallback_action=fallback_action,
     decide=decide,
+    planner_guidance=PLANNER_GUIDANCE,
 )
 
 app = create_agent_app(DEFINITION)

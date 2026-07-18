@@ -78,15 +78,24 @@ TOOL_BROKER_POLL_INTERVAL_SECONDS = float(
 TOOL_BROKER_TIMEOUT_SECONDS = float(os.getenv("TOOL_BROKER_TIMEOUT_SECONDS", "120"))
 
 LLM_PLANNER_SYSTEM_PROMPT = """
-You route enterprise agent requests to one workflow action.
+You plan one enterprise agent run: pick exactly one workflow action for the
+user's message and, for data actions, the arguments that answer it.
 Return only a JSON object with this shape:
-{"action":"sql|report|approval","reason":"short reason"}
+{"action":"<allowed action>","reason":"short reason","arguments":{},"reply":""}
 
 Rules:
-- Choose "approval" for destructive, write, delete, data approval, or other human approval requests.
-- Choose "report" only for explicit report, dashboard, document, or export generation requests when report is allowed.
-- Choose "sql" for data lookup, analytics, list, show, count, compare, summarize, or read-only database questions.
-- Do not write SQL or tool payloads.
+- Pick "action" only from the allowed actions in the request.
+- Choose "chat" for greetings, small talk, thanks, and anything outside this
+  agent's domain. Write the user-facing answer in "reply": 1-3 friendly
+  sentences that also say what this agent can help with. Leave "arguments"
+  empty and never pick a data action for such messages.
+- Choose "approval" for destructive, write, delete, data approval, or other
+  human approval requests.
+- Choose "report" only for explicit report, dashboard, document, or export
+  generation requests when report is allowed.
+- For data actions, build "arguments" exactly as the agent guidance in the
+  request describes; never invent argument fields it does not mention.
+- Leave "reply" empty for every action except "chat".
 """.strip()
 
 
@@ -106,7 +115,7 @@ class AgentRunRequest(BaseModel):
 class AgentDecision(BaseModel):
     """What the agent wants to happen; the orchestrator enforces and executes."""
 
-    action: Literal["tool", "approval", "deny", "async"]
+    action: Literal["tool", "approval", "deny", "async", "final"]
     workflow: str
     planner_action: str
     planner_source: str = "fallback"
@@ -115,6 +124,17 @@ class AgentDecision(BaseModel):
     required_permission: str | None = None
     audit_event: str | None = None
     reason: str | None = None
+    # Direct user-facing answer for action="final": the run completes with this
+    # text and no tool is dispatched (used for chat/small-talk turns).
+    output: str | None = None
+
+
+class PlannedAction(BaseModel):
+    """One planner outcome: the chosen action plus any LLM-planned inputs."""
+
+    action: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    reply: str | None = None
 
 
 class ToolBrokerError(RuntimeError):
@@ -273,7 +293,10 @@ class AgentDefinition:
     required_permissions: tuple[str, ...]
     tools: tuple[str, ...]
     fallback_action: Callable[[str], str]
-    decide: Callable[[str, AgentRunRequest], AgentDecision]
+    decide: Callable[[PlannedAction, AgentRunRequest], AgentDecision]
+    # Domain instructions appended to the planner prompt: which arguments each
+    # data action takes and, for SQL-writing agents, the queryable schema.
+    planner_guidance: str = ""
     # Driver for decisions with action="async": receives the run request and a
     # ToolBrokerClient, returns the final run output. The runtime schedules it
     # in the background and reports completion/failure to the orchestrator.
@@ -368,7 +391,7 @@ async def litellm_plan_action(
     context: dict[str, Any] | None,
     parent_context: Context | None,
     langfuse_tracer: Tracer,
-) -> str | None:
+) -> PlannedAction | None:
     with langfuse_generation_span(
         langfuse_tracer,
         definition.workflow,
@@ -381,6 +404,11 @@ async def litellm_plan_action(
             return None
 
         allowed_actions = definition.actions
+        guidance = (
+            f"Agent guidance:\n{definition.planner_guidance}\n"
+            if definition.planner_guidance
+            else ""
+        )
         payload = {
             "model": LITELLM_MODEL,
             "temperature": 0,
@@ -391,6 +419,7 @@ async def litellm_plan_action(
                     "content": (
                         f"Workflow: {definition.workflow}\n"
                         f"Allowed actions: {', '.join(sorted(allowed_actions))}\n"
+                        f"{guidance}"
                         f"User message: {message}"
                     ),
                 },
@@ -457,7 +486,13 @@ async def litellm_plan_action(
             span.set_attributes(
                 {"app.planner.result": "selected", "app.workflow.action": action},
             )
-            return action
+            arguments = decision.get("arguments")
+            reply = decision.get("reply")
+            return PlannedAction(
+                action=action,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                reply=str(reply).strip() or None if reply else None,
+            )
 
         span.set_attributes(
             {"app.planner.result": "invalid_action", "app.workflow.action": action},
@@ -472,7 +507,7 @@ async def choose_plan_action(
     parent_context: Context | None,
     tracer: Tracer,
     langfuse_tracer: Tracer,
-) -> tuple[str, str]:
+) -> tuple[PlannedAction, str]:
     with tracer.start_as_current_span(
         "agent.choose_plan_action",
         kind=SpanKind.INTERNAL,
@@ -483,27 +518,27 @@ async def choose_plan_action(
             },
         ),
     ) as span:
-        action = await litellm_plan_action(
+        planned = await litellm_plan_action(
             definition,
             message,
             context,
             parent_context,
             langfuse_tracer,
         )
-        if action is not None:
+        if planned is not None:
             span.set_attributes(
-                {"app.workflow.action": action, "app.planner.source": "litellm"},
+                {"app.workflow.action": planned.action, "app.planner.source": "litellm"},
             )
-            return action, "litellm"
+            return planned, "litellm"
 
-        fallback_action = definition.fallback_action(message)
+        fallback = PlannedAction(action=definition.fallback_action(message))
         span.set_attributes(
             {
-                "app.workflow.action": fallback_action,
+                "app.workflow.action": fallback.action,
                 "app.planner.source": "fallback",
             },
         )
-        return fallback_action, "fallback"
+        return fallback, "fallback"
 
 
 def build_workflow(
@@ -534,7 +569,7 @@ def build_workflow(
                 allowed_permissions=state["allowed_permissions"],
                 policy_subjects=state["policy_subjects"],
             )
-            action, planner_source = await choose_plan_action(
+            planned, planner_source = await choose_plan_action(
                 definition,
                 request.message,
                 planner_trace_context(request),
@@ -542,13 +577,13 @@ def build_workflow(
                 tracer,
                 langfuse_tracer,
             )
-            decision = definition.decide(action, request).model_copy(
+            decision = definition.decide(planned, request).model_copy(
                 update={"planner_source": planner_source},
             )
             span.set_attributes(
                 clean_attributes(
                     {
-                        "app.workflow.action": action,
+                        "app.workflow.action": planned.action,
                         "app.planner.source": planner_source,
                         "app.decision.action": decision.action,
                         "app.tool": decision.tool,

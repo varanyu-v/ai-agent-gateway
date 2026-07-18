@@ -124,7 +124,7 @@ Machine-readable identity and capabilities (A2A-style):
   "description": "...",
   "version": "1.0.0",
   "workflow": "world",
-  "capabilities": {"actions": ["approval", "report", "sql"]},
+  "capabilities": {"actions": ["approval", "chat", "report", "sql"]},
   "requirements": {"permissions": ["world-db"], "tools": ["sql", "report"]},
   "endpoints": {"run": "/runs", "health": "/health"}
 }
@@ -183,6 +183,10 @@ Response — the decision the orchestrator will enforce and execute:
 - `async`: accept the run and drive it in the background through the
   tool-broker callback API (below). The run stays `running` until the agent
   reports its final outcome.
+- `final`: complete the run immediately with the user-facing text in
+  `output` and no tool call. The shipped agents use this for the `chat`
+  planner action (greetings, small talk, off-topic messages), so a chat turn
+  never falls through to a default database lookup.
 
 ### `GET /health`
 

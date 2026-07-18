@@ -17,6 +17,7 @@ from apps.mcp.runtime import (
     McpToolError,
     create_mcp_app,
     parse_limit_argument,
+    parse_sql_argument,
     query_data_plane,
 )
 
@@ -105,6 +106,16 @@ async def country_overview(
     }
 
 
+async def run_sql(
+    arguments: dict[str, Any],
+    context: McpToolContext,
+) -> dict[str, Any]:
+    """Run one planner-written SELECT under the world data plane's guard."""
+    sql = parse_sql_argument(arguments)
+    rows = await query_data_plane(context, WORLD_DATA_PLANE_URL, "world", sql)
+    return {"rows": rows, "row_count": len(rows), "sql": sql}
+
+
 DEFINITION = McpServerDefinition(
     server_id="world-mcp",
     name="World MCP Service",
@@ -162,6 +173,27 @@ DEFINITION = McpServerDefinition(
                 "additionalProperties": False,
             },
             handler=country_overview,
+            required_permission="world-db",
+        ),
+        McpTool(
+            name="run_sql",
+            description=(
+                "Run one read-only SELECT over the world database (tables: "
+                "city, country, country_language). The data plane enforces "
+                "the final SELECT-only, table-allowlisted, row-capped guard."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "A single read-only SELECT statement.",
+                    },
+                },
+                "required": ["sql"],
+                "additionalProperties": False,
+            },
+            handler=run_sql,
             required_permission="world-db",
         ),
     ),

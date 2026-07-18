@@ -35,7 +35,8 @@ from apps.observability import clean_attributes, setup_observability
 
 
 UI_FILE = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
-UI_PATHS = {"/", "/ui"}
+CHAT_UI_FILE = Path(__file__).resolve().parents[1] / "frontend" / "chat.html"
+UI_PATHS = {"/", "/ui", "/chat"}
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 SERVICE_STARTED_AT = time.monotonic()
 
@@ -148,6 +149,11 @@ async def test_console() -> FileResponse:
 @app.get("/ui", include_in_schema=False)
 async def test_console_alias() -> FileResponse:
     return FileResponse(UI_FILE)
+
+
+@app.get("/chat", include_in_schema=False)
+async def chat_ui() -> FileResponse:
+    return FileResponse(CHAT_UI_FILE)
 
 
 @app.get("/healthz", include_in_schema=False)

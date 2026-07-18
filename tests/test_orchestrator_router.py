@@ -210,6 +210,35 @@ class AssistantRunTests(RouterTestCase):
         routed = orchestrator.agent_registry.get("world-agent")
         self.assertEqual(tool_requests[0]["workflow"], routed.workflow)
 
+    async def test_agent_final_answer_completes_run_with_output(self) -> None:
+        async def fake_invoke(agent, state, thread_id, langfuse_span) -> dict:
+            return {
+                "action": "final",
+                "output": "Hello! Ask me about world data.",
+                "audit_event": "agent_chat_answered",
+            }
+
+        with patch.object(orchestrator, "invoke_agent_service", fake_invoke):
+            async with orchestrator_client() as client:
+                response = await client.post(
+                    "/internal/agents/world-agent/runs",
+                    headers=RUN_HEADERS,
+                    json={"message": "HI"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertEqual(body["agent_id"], "world-agent")
+
+        run_record = orchestrator.RUNS[RUN_ID]
+        self.assertEqual(run_record["status"], "completed")
+        self.assertEqual(run_record["output"], "Hello! Ask me about world data.")
+
+        events = [event["event"] for event in self.published_events("audit.events")]
+        self.assertIn("agent_chat_answered", events)
+        self.assertEqual(self.published_events("tool.requested"), [])
+
     async def test_routed_agent_requires_invoke_permission(self) -> None:
         async with orchestrator_client() as client:
             response = await client.post(

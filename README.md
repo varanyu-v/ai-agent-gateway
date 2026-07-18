@@ -30,6 +30,13 @@ Open the test console:
 http://localhost:8000/ui
 ```
 
+Open the end-user chat UI (sign in with any seeded demo user; every message
+goes through the `assistant` router):
+
+```text
+http://localhost:8000/chat
+```
+
 Open observability tools:
 
 ```text
@@ -64,6 +71,7 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent mcp-wo
 - `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world`, `apps/mcp/procurement`, and `apps/mcp/report` (report generation as a queued job, no database access) are the three example servers. See `docs/mcp-services.md`.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
 - `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, tool response rendering, agent input/output, and human approval.
+- `apps/frontend/chat.html`: production-style chat UI (`/chat`). Hides all platform internals: every message is sent to the `assistant` router, tool results render as tables in the conversation, and approvals surface as an inline button.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
 - `docker/otel/collector-config.yaml`: local OTLP collector pipeline that forwards traces to Tempo and exposes metrics for Prometheus.
 - `docker/prometheus/prometheus.yml`: Prometheus scrape config for app metrics exported by the collector.
@@ -104,8 +112,8 @@ flowchart TD
     end
 
     subgraph agents["Agent services (one service per agent)"]
-        world_agent["world-agent :8004<br/>LangGraph + LiteLLM planner<br/>actions: sql, report, brief, approval<br/>requires: world-db"]
-        procurement_agent["procurement-agent :8005<br/>LangGraph + LiteLLM planner<br/>actions: sql, approval<br/>requires: procurement-db"]
+        world_agent["world-agent :8004<br/>LangGraph + LiteLLM planner<br/>actions: chat, sql, report, brief, country, approval<br/>requires: world-db"]
+        procurement_agent["procurement-agent :8005<br/>LangGraph + LiteLLM planner<br/>actions: chat, sql, risk, approval<br/>requires: procurement-db"]
     end
 
     subgraph tools["Tool execution"]
@@ -202,6 +210,7 @@ flowchart TD
 | Keycloak | `http://localhost:8080` | Local OIDC issuer and seeded users |
 | Gateway | `http://localhost:8000` | Public API and test console |
 | Test console | `http://localhost:8000/ui` | Browser UI for end-to-end testing |
+| Chat UI | `http://localhost:8000/chat` | Production-style chat routed through the `assistant` agent |
 | Orchestrator | `http://localhost:8001` | Internal run routing, policy enforcement, and run state API |
 | World agent | `http://localhost:8004` | Standalone world-agent service (`/.well-known/agent-card`) |
 | Procurement agent | `http://localhost:8005` | Standalone procurement-agent service (`/.well-known/agent-card`) |

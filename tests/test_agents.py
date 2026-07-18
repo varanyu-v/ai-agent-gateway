@@ -48,7 +48,7 @@ class AgentContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(card["workflow"], "world")
         self.assertEqual(
             card["capabilities"]["actions"],
-            ["approval", "brief", "country", "report", "sql"],
+            ["approval", "brief", "chat", "country", "report", "sql"],
         )
         self.assertEqual(card["requirements"]["permissions"], ["world-db"])
         self.assertEqual(card["endpoints"]["run"], "/runs")
@@ -60,7 +60,10 @@ class AgentContractTests(unittest.IsolatedAsyncioTestCase):
         card = response.json()
         self.assertEqual(card["id"], "procurement-agent")
         self.assertEqual(card["workflow"], "procurement")
-        self.assertEqual(card["capabilities"]["actions"], ["approval", "risk", "sql"])
+        self.assertEqual(
+            card["capabilities"]["actions"],
+            ["approval", "chat", "risk", "sql"],
+        )
 
     async def test_health_reports_agent_service_name(self) -> None:
         async with agent_client(procurement_app) as client:
@@ -181,6 +184,22 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_world_agent_answers_greeting_without_running_sql(self) -> None:
+        body = await self.run_agent(world_app, "HI")
+        decision = body["decision"]
+        self.assertEqual(decision["action"], "final")
+        self.assertEqual(decision["planner_action"], "chat")
+        self.assertIsNone(decision["tool"])
+        self.assertIn("world analyst", decision["output"].lower())
+
+    async def test_procurement_agent_answers_greeting_without_running_sql(self) -> None:
+        body = await self.run_agent(procurement_app, "hello there, how are you?")
+        decision = body["decision"]
+        self.assertEqual(decision["action"], "final")
+        self.assertEqual(decision["planner_action"], "chat")
+        self.assertIsNone(decision["tool"])
+        self.assertIn("procurement", decision["output"].lower())
+
     async def test_world_agent_routes_brief_to_async_callback_run(self) -> None:
         with patch.object(runtime, "start_background_run") as start_background:
             body = await self.run_agent(world_app, "prepare a world market brief")
@@ -192,6 +211,64 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         definition, request = start_background.call_args.args
         self.assertIs(definition, world_main.DEFINITION)
         self.assertEqual(request.request_id, "req-1")
+
+
+class PlannedArgumentTests(unittest.TestCase):
+    """decide() turns LLM-planned arguments into guarded tool calls."""
+
+    def request(self, message: str = "which countries speak French?"):
+        return runtime.AgentRunRequest(**{**RUN_PAYLOAD, "message": message})
+
+    def test_world_planned_sql_runs_through_run_sql_tool(self) -> None:
+        sql = "select name from country where code = 'FRA' limit 5"
+        decision = world_main.decide(
+            runtime.PlannedAction(action="sql", arguments={"sql": sql}),
+            self.request(),
+        )
+        self.assertEqual(decision.action, "tool")
+        self.assertEqual(
+            decision.tool_input,
+            {"server": "world-mcp", "name": "run_sql", "arguments": {"sql": sql}},
+        )
+        self.assertEqual(decision.required_permission, "world-db")
+
+    def test_world_sql_without_planned_query_falls_back_to_top_cities(self) -> None:
+        decision = world_main.decide(
+            runtime.PlannedAction(action="sql"),
+            self.request(),
+        )
+        self.assertEqual(decision.tool_input["name"], "list_top_cities")
+
+    def test_world_chat_uses_planner_reply(self) -> None:
+        decision = world_main.decide(
+            runtime.PlannedAction(action="chat", reply="Hello! Ask me about cities."),
+            self.request("HI"),
+        )
+        self.assertEqual(decision.action, "final")
+        self.assertEqual(decision.output, "Hello! Ask me about cities.")
+
+    def test_world_country_prefers_planned_code_over_heuristic(self) -> None:
+        decision = world_main.decide(
+            runtime.PlannedAction(action="country", arguments={"country_code": "FR"}),
+            self.request("tell me about France"),
+        )
+        self.assertEqual(
+            decision.tool_input["arguments"],
+            {"country_code": "FR"},
+        )
+
+    def test_procurement_planned_sql_runs_through_run_sql_tool(self) -> None:
+        from apps.agents.procurement import main as procurement_main
+
+        sql = "select supplier_name from supplier_summary limit 3"
+        decision = procurement_main.decide(
+            runtime.PlannedAction(action="sql", arguments={"sql": sql}),
+            self.request("top 3 suppliers"),
+        )
+        self.assertEqual(
+            decision.tool_input,
+            {"server": "procurement-mcp", "name": "run_sql", "arguments": {"sql": sql}},
+        )
 
 
 class OrchestratorBrokerStub:

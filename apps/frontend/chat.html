@@ -1,0 +1,719 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PTVN Assistant</title>
+    <style>
+      :root {
+        --bg: #f4f5f7;
+        --surface: #ffffff;
+        --border: #e2e5ea;
+        --text: #1c2330;
+        --text-muted: #667085;
+        --accent: #2f5fde;
+        --accent-text: #ffffff;
+        --bubble-user: #2f5fde;
+        --bubble-user-text: #ffffff;
+        --bubble-agent: #ffffff;
+        --error: #b42318;
+        --shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #10141c;
+          --surface: #1a2030;
+          --border: #2a3247;
+          --text: #e6e9f0;
+          --text-muted: #98a2b3;
+          --accent: #5b83f0;
+          --bubble-user: #3b62c9;
+          --bubble-user-text: #f4f6ff;
+          --bubble-agent: #1f2739;
+          --error: #f97066;
+          --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* ---------- Login ---------- */
+      .login-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .login-card {
+        width: 100%;
+        max-width: 360px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 32px 28px;
+        box-shadow: var(--shadow);
+      }
+      .login-card h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      .login-card p {
+        margin: 0 0 24px;
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+      .field {
+        margin-bottom: 14px;
+      }
+      .field label {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 6px;
+        color: var(--text-muted);
+      }
+      .field input {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+      }
+      .field input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+      }
+      .login-error {
+        color: var(--error);
+        font-size: 13px;
+        min-height: 18px;
+        margin: 4px 0 10px;
+      }
+      .btn-primary {
+        width: 100%;
+        padding: 11px;
+        border: none;
+        border-radius: 10px;
+        background: var(--accent);
+        color: var(--accent-text);
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-primary:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+
+      /* ---------- Chat ---------- */
+      .chat-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 20px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+      }
+      .chat-header .title {
+        font-weight: 700;
+        font-size: 16px;
+      }
+      .chat-header .who {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      .chat-header button {
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-muted);
+        padding: 6px 12px;
+        border-radius: 8px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 24px 16px 12px;
+      }
+      .messages-inner {
+        max-width: 760px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .msg {
+        display: flex;
+      }
+      .msg.user {
+        justify-content: flex-end;
+      }
+      .bubble {
+        max-width: 82%;
+        padding: 11px 15px;
+        border-radius: 16px;
+        font-size: 15px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .msg.user .bubble {
+        background: var(--bubble-user);
+        color: var(--bubble-user-text);
+        border-bottom-right-radius: 6px;
+      }
+      .msg.agent .bubble {
+        background: var(--bubble-agent);
+        border: 1px solid var(--border);
+        border-bottom-left-radius: 6px;
+        box-shadow: var(--shadow);
+      }
+      .msg.agent .bubble.error {
+        border-color: var(--error);
+        color: var(--error);
+      }
+      .table-scroll {
+        overflow-x: auto;
+        margin-top: 10px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      table {
+        border-collapse: collapse;
+        font-size: 13px;
+        width: 100%;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 7px 12px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--text-muted);
+        font-weight: 600;
+        background: color-mix(in srgb, var(--border) 35%, transparent);
+      }
+      tr:last-child td {
+        border-bottom: none;
+      }
+      .approve-row {
+        margin-top: 10px;
+      }
+      .approve-row button {
+        border: none;
+        background: var(--accent);
+        color: var(--accent-text);
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .approve-row button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .typing {
+        display: inline-flex;
+        gap: 5px;
+        align-items: center;
+        padding: 6px 2px;
+      }
+      .typing i {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--text-muted);
+        animation: blink 1.2s infinite;
+      }
+      .typing i:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+      .typing i:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+      @keyframes blink {
+        0%,
+        60%,
+        100% {
+          opacity: 0.25;
+        }
+        30% {
+          opacity: 1;
+        }
+      }
+
+      .composer {
+        padding: 12px 16px 20px;
+        background: var(--bg);
+      }
+      .composer-inner {
+        max-width: 760px;
+        margin: 0 auto;
+        display: flex;
+        gap: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 8px 8px 8px 16px;
+        box-shadow: var(--shadow);
+      }
+      .composer textarea {
+        flex: 1;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 15px;
+        resize: none;
+        max-height: 140px;
+        padding: 8px 0;
+      }
+      .composer textarea:focus {
+        outline: none;
+      }
+      .composer button {
+        align-self: flex-end;
+        border: none;
+        background: var(--accent);
+        color: var(--accent-text);
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        font-size: 17px;
+        cursor: pointer;
+      }
+      .composer button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Login -->
+    <div class="login-wrap" id="loginView">
+      <form class="login-card" id="loginForm">
+        <h1>PTVN Assistant</h1>
+        <p>Sign in to start chatting.</p>
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+        </div>
+        <div class="login-error" id="loginError"></div>
+        <button class="btn-primary" id="loginBtn" type="submit">Sign in</button>
+      </form>
+    </div>
+
+    <!-- Chat -->
+    <header class="chat-header" id="chatHeader" hidden>
+      <span class="title">PTVN Assistant</span>
+      <span class="who">
+        <span id="whoAmI"></span>
+        <button id="logoutBtn" type="button">Sign out</button>
+      </span>
+    </header>
+    <main class="messages" id="messagesView" hidden>
+      <div class="messages-inner" id="messages"></div>
+    </main>
+    <footer class="composer" id="composerView" hidden>
+      <div class="composer-inner">
+        <textarea
+          id="messageInput"
+          rows="1"
+          placeholder="Ask anything…"
+          autocomplete="off"
+        ></textarea>
+        <button id="sendBtn" type="button" title="Send" aria-label="Send">➤</button>
+      </div>
+    </footer>
+
+    <script>
+      "use strict";
+
+      const ASSISTANT_AGENT = "assistant";
+      const POLL_INTERVAL_MS = 800;
+      const POLL_MAX_ATTEMPTS = 60;
+      const WELCOME_MESSAGE =
+        "Hi! I can answer general questions and look up world and " +
+        "procurement data for you. What would you like to know?";
+
+      const state = {
+        config: null,
+        token: "",
+        username: "",
+        threadId:
+          (window.crypto && crypto.randomUUID && crypto.randomUUID()) ||
+          `thread-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        busy: false,
+      };
+
+      const els = {
+        loginView: document.getElementById("loginView"),
+        loginForm: document.getElementById("loginForm"),
+        loginBtn: document.getElementById("loginBtn"),
+        loginError: document.getElementById("loginError"),
+        username: document.getElementById("username"),
+        password: document.getElementById("password"),
+        chatHeader: document.getElementById("chatHeader"),
+        messagesView: document.getElementById("messagesView"),
+        messages: document.getElementById("messages"),
+        composerView: document.getElementById("composerView"),
+        messageInput: document.getElementById("messageInput"),
+        sendBtn: document.getElementById("sendBtn"),
+        whoAmI: document.getElementById("whoAmI"),
+        logoutBtn: document.getElementById("logoutBtn"),
+      };
+
+      /* ---------- View state ---------- */
+
+      function showLogin(errorMessage = "") {
+        state.token = "";
+        els.loginView.hidden = false;
+        els.chatHeader.hidden = true;
+        els.messagesView.hidden = true;
+        els.composerView.hidden = true;
+        els.loginError.textContent = errorMessage;
+        els.messages.replaceChildren();
+      }
+
+      function showChat() {
+        els.loginView.hidden = true;
+        els.chatHeader.hidden = false;
+        els.messagesView.hidden = false;
+        els.composerView.hidden = false;
+        els.whoAmI.textContent = state.username;
+        addAgentText(WELCOME_MESSAGE);
+        els.messageInput.focus();
+      }
+
+      /* ---------- Message rendering ---------- */
+
+      function scrollToBottom() {
+        els.messagesView.scrollTop = els.messagesView.scrollHeight;
+      }
+
+      function addBubble(role) {
+        const msg = document.createElement("div");
+        msg.className = `msg ${role}`;
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        msg.append(bubble);
+        els.messages.append(msg);
+        scrollToBottom();
+        return bubble;
+      }
+
+      function addUserText(text) {
+        addBubble("user").textContent = text;
+      }
+
+      function addAgentText(text, { error = false } = {}) {
+        const bubble = addBubble("agent");
+        if (error) {
+          bubble.classList.add("error");
+        }
+        bubble.textContent = text;
+        return bubble;
+      }
+
+      function addTyping() {
+        const bubble = addBubble("agent");
+        const typing = document.createElement("span");
+        typing.className = "typing";
+        typing.append(
+          document.createElement("i"),
+          document.createElement("i"),
+          document.createElement("i"),
+        );
+        bubble.append(typing);
+        return bubble;
+      }
+
+      function renderRowsTable(bubble, rows) {
+        if (!Array.isArray(rows) || !rows.length) {
+          return;
+        }
+        const columns = Object.keys(rows[0]);
+        const wrap = document.createElement("div");
+        wrap.className = "table-scroll";
+        const table = document.createElement("table");
+
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        columns.forEach((column) => {
+          const th = document.createElement("th");
+          th.textContent = column.replaceAll("_", " ");
+          headRow.append(th);
+        });
+        thead.append(headRow);
+
+        const tbody = document.createElement("tbody");
+        rows.forEach((row) => {
+          const tr = document.createElement("tr");
+          columns.forEach((column) => {
+            const td = document.createElement("td");
+            const value = row[column];
+            td.textContent = value === null || value === undefined ? "—" : String(value);
+            tr.append(td);
+          });
+          tbody.append(tr);
+        });
+
+        table.append(thead, tbody);
+        wrap.append(table);
+        bubble.append(wrap);
+        scrollToBottom();
+      }
+
+      function summarizeRun(run) {
+        const rows = run.result?.output?.rows;
+        if (Array.isArray(rows)) {
+          return rows.length
+            ? `Here's what I found — ${rows.length} row(s):`
+            : "The lookup ran successfully but returned no rows.";
+        }
+        const reportId = run.result?.output?.report_id;
+        if (reportId) {
+          return `Your report is ready: ${reportId}.`;
+        }
+        return run.output || "Done.";
+      }
+
+      function renderFinishedRun(bubble, run) {
+        bubble.replaceChildren();
+        if (run.status === "failed") {
+          bubble.classList.add("error");
+          bubble.textContent =
+            "Sorry — I couldn't complete that request. Please try rephrasing it.";
+          return;
+        }
+        if (run.status === "denied") {
+          bubble.textContent =
+            run.denied_reason ||
+            "Sorry — you don't have permission for that request.";
+          return;
+        }
+        bubble.textContent = summarizeRun(run);
+        renderRowsTable(bubble, run.result?.output?.rows);
+      }
+
+      function renderApprovalRequest(bubble, runId) {
+        bubble.replaceChildren();
+        bubble.textContent =
+          "This request needs a human sign-off before I can continue.";
+        const row = document.createElement("div");
+        row.className = "approve-row";
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Approve request";
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          button.textContent = "Approving…";
+          try {
+            const run = await api("POST", `/runs/${runId}/approve`);
+            renderFinishedRun(bubble, run);
+          } catch (error) {
+            addAgentText(`Approval failed: ${error.message}`, { error: true });
+            button.disabled = false;
+            button.textContent = "Approve request";
+          }
+        });
+        row.append(button);
+        bubble.append(row);
+        scrollToBottom();
+      }
+
+      /* ---------- API ---------- */
+
+      class AuthError extends Error {}
+
+      async function api(method, path, body) {
+        const response = await fetch(path, {
+          method,
+          headers: {
+            Authorization: `Bearer ${state.token}`,
+            ...(body ? { "Content-Type": "application/json" } : {}),
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        let data = null;
+        try {
+          data = await response.json();
+        } catch (error) {
+          data = null;
+        }
+        if (response.status === 401) {
+          throw new AuthError("Your session expired. Please sign in again.");
+        }
+        if (!response.ok) {
+          throw new Error(data?.detail || `Request failed (${response.status})`);
+        }
+        return data;
+      }
+
+      async function pollRun(runId) {
+        for (let attempt = 0; attempt < POLL_MAX_ATTEMPTS; attempt += 1) {
+          const run = await api("GET", `/runs/${runId}`);
+          if (!["requested", "running"].includes(run.status)) {
+            return run;
+          }
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        }
+        throw new Error("The request is taking too long. Please try again.");
+      }
+
+      /* ---------- Chat flow ---------- */
+
+      async function sendMessage() {
+        const text = els.messageInput.value.trim();
+        if (!text || state.busy) {
+          return;
+        }
+        state.busy = true;
+        els.sendBtn.disabled = true;
+        els.messageInput.value = "";
+        autosize();
+        addUserText(text);
+        const bubble = addTyping();
+
+        try {
+          const started = await api("POST", `/agents/${ASSISTANT_AGENT}/runs`, {
+            message: text,
+            thread_id: state.threadId,
+          });
+          const runId = started.run_id;
+
+          if (started.status === "requires_approval") {
+            renderApprovalRequest(bubble, runId);
+          } else if (started.status === "denied") {
+            renderFinishedRun(bubble, started);
+          } else {
+            // completed (chat/general answers) and running (tool runs) both
+            // read the final record from the run store.
+            const run =
+              started.status === "running" || started.status === "requested"
+                ? await pollRun(runId)
+                : await api("GET", `/runs/${runId}`);
+            if (run.status === "requires_approval") {
+              renderApprovalRequest(bubble, runId);
+            } else {
+              renderFinishedRun(bubble, run);
+            }
+          }
+        } catch (error) {
+          if (error instanceof AuthError) {
+            showLogin(error.message);
+          } else {
+            bubble.replaceChildren();
+            bubble.classList.add("error");
+            bubble.textContent = `Sorry — something went wrong: ${error.message}`;
+          }
+        } finally {
+          state.busy = false;
+          els.sendBtn.disabled = false;
+          els.messageInput.focus();
+        }
+      }
+
+      /* ---------- Auth ---------- */
+
+      async function loadConfig() {
+        if (state.config) {
+          return state.config;
+        }
+        const response = await fetch("/ui/config");
+        if (!response.ok) {
+          throw new Error("The gateway is not reachable right now.");
+        }
+        state.config = await response.json();
+        return state.config;
+      }
+
+      async function login(event) {
+        event.preventDefault();
+        els.loginBtn.disabled = true;
+        els.loginError.textContent = "";
+        try {
+          const config = await loadConfig();
+          const body = new URLSearchParams();
+          body.set("client_id", config.keycloakClientId);
+          body.set("grant_type", "password");
+          body.set("username", els.username.value);
+          body.set("password", els.password.value);
+          const response = await fetch(config.keycloakTokenUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body,
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            throw new Error(
+              data.error_description || data.error || response.statusText,
+            );
+          }
+          state.token = data.access_token;
+          state.username = els.username.value;
+          els.password.value = "";
+          showChat();
+        } catch (error) {
+          els.loginError.textContent = `Sign-in failed: ${error.message}`;
+        } finally {
+          els.loginBtn.disabled = false;
+        }
+      }
+
+      /* ---------- Wiring ---------- */
+
+      function autosize() {
+        els.messageInput.style.height = "auto";
+        els.messageInput.style.height = `${Math.min(
+          els.messageInput.scrollHeight,
+          140,
+        )}px`;
+      }
+
+      els.loginForm.addEventListener("submit", login);
+      els.logoutBtn.addEventListener("click", () => showLogin());
+      els.sendBtn.addEventListener("click", sendMessage);
+      els.messageInput.addEventListener("input", autosize);
+      els.messageInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendMessage();
+        }
+      });
+
+      loadConfig().catch(() => {
+        els.loginError.textContent =
+          "The gateway is not reachable right now. Refresh to retry.";
+      });
+    </script>
+  </body>
+</html>

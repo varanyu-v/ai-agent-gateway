@@ -27,9 +27,11 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
+import sqlglot
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse
 from opentelemetry.trace import SpanKind, Status, StatusCode
+from sqlglot import exp
 
 from apps.observability import clean_attributes, setup_observability
 
@@ -134,6 +136,44 @@ def parse_limit_argument(
     if not 1 <= value <= maximum:
         raise McpToolError(f"limit must be between 1 and {maximum}")
     return value
+
+
+MAX_SQL_LENGTH = 4000
+
+_FORBIDDEN_SQL_NODES = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Drop,
+    exp.Alter,
+    exp.Create,
+)
+
+
+def parse_sql_argument(arguments: dict[str, Any]) -> str:
+    """Validate the `sql` tool argument into one read-only SELECT statement.
+
+    This is a fail-fast courtesy check so planner mistakes surface as clear
+    tool errors; the owning data plane re-validates with the authoritative
+    guard (SELECT-only, table allowlist, row cap, tenant-scoped session).
+    """
+    sql = arguments.get("sql")
+    if not isinstance(sql, str) or not sql.strip():
+        raise McpToolError("sql must be a non-empty string")
+    sql = sql.strip().rstrip(";")
+    if len(sql) > MAX_SQL_LENGTH:
+        raise McpToolError(f"sql exceeds the maximum length of {MAX_SQL_LENGTH}")
+
+    try:
+        trees = sqlglot.parse(sql)
+    except sqlglot.errors.ParseError as exc:
+        raise McpToolError(f"sql could not be parsed: {exc}") from exc
+    if len(trees) != 1 or trees[0] is None:
+        raise McpToolError("sql must contain exactly one statement")
+    tree = trees[0]
+    if any(tree.find(kind) for kind in _FORBIDDEN_SQL_NODES) or not tree.find(exp.Select):
+        raise McpToolError("sql must be a single read-only SELECT statement")
+    return sql
 
 
 async def query_data_plane(
