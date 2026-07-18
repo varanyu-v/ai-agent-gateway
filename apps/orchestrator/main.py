@@ -158,6 +158,25 @@ def remember_run(run_id: str, payload: dict[str, Any]) -> None:
     RUNS[run_id] = {**RUNS.get(run_id, {}), **payload}
 
 
+def completed_tool_output(
+    tool: str | None,
+    result: dict[str, Any] | None,
+) -> str | None:
+    if tool == "sql":
+        rows = result.get("rows", []) if result else []
+        return f"SQL tool completed with {len(rows)} row(s)."
+    if tool == "report":
+        report_id = result.get("report_id") if result else None
+        return f"Report tool completed: {report_id}."
+    if tool == "mcp":
+        name = result.get("tool") if result else None
+        output = (result or {}).get("output") or {}
+        row_count = output.get("row_count")
+        suffix = f" with {row_count} row(s)" if isinstance(row_count, int) else ""
+        return f"MCP tool '{name}' completed{suffix}."
+    return None
+
+
 def run_output_for_status(
     status: str,
     *,
@@ -171,12 +190,10 @@ def run_output_for_status(
         return "Human approval is required before this request can continue."
     if status == "approved":
         return "Human approval was recorded. This sample does not execute destructive follow-up actions."
-    if status == "completed" and tool == "sql":
-        rows = result.get("rows", []) if result else []
-        return f"SQL tool completed with {len(rows)} row(s)."
-    if status == "completed" and tool == "report":
-        report_id = result.get("report_id") if result else None
-        return f"Report tool completed: {report_id}."
+    if status == "completed":
+        tool_output = completed_tool_output(tool, result)
+        if tool_output is not None:
+            return tool_output
     if status == "failed":
         return "Tool execution failed."
     if status == "running":

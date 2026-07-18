@@ -12,6 +12,7 @@ from apps.orchestrator.mcp_registry import (
     McpServiceError,
     parse_mcp_services,
 )
+from apps.workers.mcp_worker import execute_mcp_tool
 
 
 def rpc(method: str, params: dict | None = None, request_id: int = 1) -> dict:
@@ -400,6 +401,128 @@ class McpRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Unknown tool", raised.exception.detail)
         finally:
             await registry.aclose()
+
+
+TOOL_EVENT = {
+    "request_id": "req-1",
+    "tenant_id": "demo-tenant",
+    "user_id": "demo-user",
+    "agent_id": "world-agent",
+    "workflow": "world",
+    "tool": "mcp",
+    "tool_call_id": "req-1:mcp:1",
+    "input": {
+        "server": "world-mcp",
+        "name": "list_top_cities",
+        "arguments": {"limit": 2},
+    },
+}
+
+
+class FakeMcpServer:
+    """MockTransport handler speaking the discovery + JSON-RPC contract."""
+
+    def __init__(self, call_result: dict | None = None, rpc_status: int = 200) -> None:
+        self.call_result = call_result or {
+            "content": [{"type": "text", "text": "{}"}],
+            "structuredContent": {"rows": [], "row_count": 0},
+            "isError": False,
+        }
+        self.rpc_status = rpc_status
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == "/.well-known/mcp-card":
+            return httpx.Response(200, json={"name": "World MCP Service"})
+        if request.url.path != "/mcp" or self.rpc_status >= 400:
+            return httpx.Response(self.rpc_status if self.rpc_status >= 400 else 404)
+        body = json.loads(request.content.decode())
+        if body["method"] == "initialize":
+            result = {"protocolVersion": "2025-06-18"}
+        elif body["method"] == "tools/list":
+            result = {"tools": [{"name": "list_top_cities"}]}
+        else:
+            result = self.call_result
+        return httpx.Response(
+            200,
+            json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+        )
+
+
+class McpWorkerTests(unittest.IsolatedAsyncioTestCase):
+    """The MCP worker routes tool.requested events to the named MCP server."""
+
+    async def started_registry(self, server: FakeMcpServer) -> McpRegistry:
+        registry = McpRegistry("world-mcp=http://world-mcp:8010")
+        await registry.start(transport=httpx.MockTransport(server.handler))
+        self.addAsyncCleanup(registry.aclose)
+        return registry
+
+    async def test_executes_tool_and_returns_structured_output(self) -> None:
+        server = FakeMcpServer(
+            call_result={
+                "content": [{"type": "text", "text": "{}"}],
+                "structuredContent": {"rows": [{"city": "Bangkok"}], "row_count": 1},
+                "isError": False,
+            },
+        )
+        registry = await self.started_registry(server)
+
+        status, result = await execute_mcp_tool(registry, TOOL_EVENT)
+
+        self.assertEqual(status, "completed")
+        self.assertEqual(
+            result,
+            {
+                "server": "world-mcp",
+                "tool": "list_top_cities",
+                "output": {"rows": [{"city": "Bangkok"}], "row_count": 1},
+            },
+        )
+        tool_call = server.requests[-1]
+        self.assertEqual(tool_call.headers["x-tenant-id"], "demo-tenant")
+        self.assertEqual(tool_call.headers["x-user-id"], "demo-user")
+        self.assertEqual(
+            json.loads(tool_call.content.decode())["params"]["arguments"],
+            {"limit": 2},
+        )
+
+    async def test_unknown_server_fails_the_tool_call(self) -> None:
+        registry = await self.started_registry(FakeMcpServer())
+
+        status, result = await execute_mcp_tool(
+            registry,
+            {**TOOL_EVENT, "input": {"server": "ghost-mcp", "name": "x"}},
+        )
+
+        self.assertEqual(status, "failed")
+        self.assertIn("No MCP server registered", result["error"])
+
+    async def test_is_error_result_fails_the_tool_call(self) -> None:
+        server = FakeMcpServer(
+            call_result={
+                "content": [{"type": "text", "text": "limit must be an integer"}],
+                "isError": True,
+            },
+        )
+        registry = await self.started_registry(server)
+
+        status, result = await execute_mcp_tool(registry, TOOL_EVENT)
+
+        self.assertEqual(status, "failed")
+        self.assertEqual(result["error"], "limit must be an integer")
+
+    async def test_server_error_is_normalized_to_failure(self) -> None:
+        server = FakeMcpServer(rpc_status=500)
+        registry = McpRegistry("world-mcp=http://world-mcp:8010")
+        await registry.start(transport=httpx.MockTransport(server.handler))
+        self.addAsyncCleanup(registry.aclose)
+
+        status, result = await execute_mcp_tool(registry, TOOL_EVENT)
+
+        self.assertEqual(status, "failed")
+        self.assertIn("internal error", result["error"])
 
 
 if __name__ == "__main__":

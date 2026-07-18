@@ -558,6 +558,22 @@ services:
       otel-collector:
         condition: service_started
 
+  mcp-worker:
+    <<: *app
+    command: python -m apps.workers.mcp_worker
+    environment:
+      <<: *app-env
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      world-mcp:
+        condition: service_healthy
+      procurement-mcp:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
   report-worker:
     <<: *app
     command: python -m apps.workers.report_worker

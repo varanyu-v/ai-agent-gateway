@@ -59,7 +59,7 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent sql-wo
 - `apps/orchestrator`: routes runs to external agent services through an agent registry, enforces Casbin source/tool policy on every agent decision before dispatch, emits Kafka events, tracks run status, and records approvals. Agents are declared in `AGENT_SERVICES` and discovered through their agent cards. Also serves the virtual `assistant` supervisor agent (`apps/orchestrator/router.py`): general questions are answered directly by the LLM, while procurement/world questions are classified and delegated to the matching agent service under the caller's Casbin agent-invoke policy.
 - `apps/agents`: standalone agent services built on a shared runtime (`apps/agents/runtime.py`). Each agent runs its own LangGraph workflow and LiteLLM planner, exposes `/.well-known/agent-card` and `POST /runs`, and returns a decision; it never touches Kafka or databases directly. `apps/agents/world` and `apps/agents/procurement` are the two current agents. See `docs/agent-services.md`.
 - `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
-- `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events. The SQL worker routes each query to the data plane that owns its database, using the `DATA_PLANES` registry.
+- `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events. The SQL worker routes each query to the data plane that owns its database, using the `DATA_PLANES` registry. The MCP worker routes `tool="mcp"` calls to the MCP server named in the decision, using the `MCP_SERVICES` registry.
 - `apps/data_access`: per-agent database access layers built on a shared runtime (`apps/data_access/runtime.py`). Each plane holds credentials for only its own database and enforces the final read-only, table-allowlisted, tenant-scoped SQL guard. `apps/data_access/world` (`world-db-access`) and `apps/data_access/procurement` (`procurement-db-access`) are the two current planes.
 - `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world` and `apps/mcp/procurement` are the two example servers. See `docs/mcp-services.md`.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
@@ -648,6 +648,7 @@ uvicorn apps.mcp.world.main:app --host 0.0.0.0 --port 8010
 uvicorn apps.mcp.procurement.main:app --host 0.0.0.0 --port 8011
 python -m apps.workers.sql_worker
 python -m apps.workers.report_worker
+python -m apps.workers.mcp_worker
 ```
 
 Kafka, Keycloak, and Postgres are still required for the full flow.

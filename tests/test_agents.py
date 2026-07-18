@@ -48,7 +48,7 @@ class AgentContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(card["workflow"], "world")
         self.assertEqual(
             card["capabilities"]["actions"],
-            ["approval", "brief", "report", "sql"],
+            ["approval", "brief", "country", "report", "sql"],
         )
         self.assertEqual(card["requirements"]["permissions"], ["world-db"])
         self.assertEqual(card["endpoints"]["run"], "/runs")
@@ -60,7 +60,7 @@ class AgentContractTests(unittest.IsolatedAsyncioTestCase):
         card = response.json()
         self.assertEqual(card["id"], "procurement-agent")
         self.assertEqual(card["workflow"], "procurement")
-        self.assertEqual(card["capabilities"]["actions"], ["approval", "sql"])
+        self.assertEqual(card["capabilities"]["actions"], ["approval", "risk", "sql"])
 
     async def test_health_reports_agent_service_name(self) -> None:
         async with agent_client(procurement_app) as client:
@@ -131,6 +131,39 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         decision = body["decision"]
         self.assertEqual(decision["action"], "approval")
         self.assertEqual(decision["audit_event"], "procurement_approval_required")
+
+    async def test_world_agent_routes_country_lookup_to_mcp_tool(self) -> None:
+        body = await self.run_agent(world_app, "give me a country overview for JPN")
+        decision = body["decision"]
+        self.assertEqual(decision["action"], "tool")
+        self.assertEqual(decision["tool"], "mcp")
+        self.assertEqual(decision["required_permission"], "world-db")
+        self.assertEqual(
+            decision["tool_input"],
+            {
+                "server": "world-mcp",
+                "name": "country_overview",
+                "arguments": {"country_code": "JPN"},
+            },
+        )
+
+    async def test_procurement_agent_routes_risk_review_to_mcp_tool(self) -> None:
+        body = await self.run_agent(
+            procurement_app,
+            "summarize spend for high risk suppliers",
+        )
+        decision = body["decision"]
+        self.assertEqual(decision["action"], "tool")
+        self.assertEqual(decision["tool"], "mcp")
+        self.assertEqual(decision["required_permission"], "procurement-db")
+        self.assertEqual(
+            decision["tool_input"],
+            {
+                "server": "procurement-mcp",
+                "name": "supplier_spend_summary",
+                "arguments": {"risk_level": "high"},
+            },
+        )
 
     async def test_world_agent_routes_brief_to_async_callback_run(self) -> None:
         with patch.object(runtime, "start_background_run") as start_background:

@@ -7,6 +7,10 @@ orchestrator after policy enforcement.
 "Market brief" requests demonstrate the async path: the agent accepts the run
 with action="async", then drives a multi-step workflow (SQL lookup, then a
 report built from it) through the orchestrator's tool-broker callback API.
+
+"Country" requests demonstrate the MCP path: the decision names the `mcp`
+tool and the MCP worker routes it to the world MCP server's
+`country_overview` tool, still behind the same Casbin checks.
 """
 
 from apps.agents.runtime import (
@@ -36,7 +40,18 @@ def fallback_action(message: str) -> str:
         return "brief"
     if "report" in text:
         return "report"
+    if "country" in text:
+        return "country"
     return "sql"
+
+
+def extract_country_code(message: str) -> str:
+    """First 2-3 letter uppercase token in the message, or the demo default."""
+    for token in message.split():
+        stripped = token.strip(".,!?()'\"")
+        if stripped.isalpha() and stripped.isupper() and 2 <= len(stripped) <= 3:
+            return stripped
+    return "THA"
 
 
 def decide(action: str, request: AgentRunRequest) -> AgentDecision:
@@ -66,6 +81,20 @@ def decide(action: str, request: AgentRunRequest) -> AgentDecision:
             tool_input={
                 "report_type": "world_market_summary",
                 "database": "world",
+            },
+        )
+
+    if action == "country":
+        return AgentDecision(
+            action="tool",
+            workflow="world",
+            planner_action=action,
+            tool="mcp",
+            required_permission="world-db",
+            tool_input={
+                "server": "world-mcp",
+                "name": "country_overview",
+                "arguments": {"country_code": extract_country_code(request.message)},
             },
         )
 
@@ -114,9 +143,9 @@ DEFINITION = AgentDefinition(
     ),
     version="1.0.0",
     workflow="world",
-    actions=frozenset({"sql", "report", "brief", "approval"}),
+    actions=frozenset({"sql", "report", "brief", "country", "approval"}),
     required_permissions=("world-db",),
-    tools=("sql", "report"),
+    tools=("sql", "report", "mcp"),
     fallback_action=fallback_action,
     decide=decide,
     run_async=run_market_brief,

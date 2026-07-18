@@ -174,7 +174,8 @@ Response — the decision the orchestrator will enforce and execute:
   `required_permission` (Casbin `datasource:* read`) and the tool (Casbin
   `tool:* execute`) before publishing `tool.requested`; a failed check denies
   the run and emits a `permission_access_denied` / `tool_access_denied` audit
-  event.
+  event. The `mcp` tool routes the call to a registered MCP server through
+  the MCP worker — same bus, same checks; see `docs/mcp-services.md`.
 - `approval`: park the run as `requires_approval` and publish the
   `audit_event` (e.g. `human_approval_required`).
 - `deny`: refuse the run with `reason`.

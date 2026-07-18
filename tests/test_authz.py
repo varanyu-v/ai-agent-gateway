@@ -125,7 +125,7 @@ class AuthzPolicyTests(unittest.TestCase):
             ["assistant", "procurement-agent", "world-agent"],
         )
         self.assertEqual(authz.allowed_data_sources(current_user), ["world-db"])
-        self.assertEqual(authz.allowed_tools(current_user), ["report", "sql"])
+        self.assertEqual(authz.allowed_tools(current_user), ["mcp", "report", "sql"])
 
     def test_legacy_data_admin_roles_map_to_data_admin(self) -> None:
         current_user = user(
@@ -201,6 +201,18 @@ class AuthzPolicyTests(unittest.TestCase):
         self.assertEqual(
             authz.tool_access_rules(),
             [
+                {
+                    "id": "mcp",
+                    "role": "role:data-admin",
+                    "roles": [
+                        "role:data-admin",
+                        "role:procurement-analyst",
+                        "role:source-auditor",
+                        "role:world-analyst",
+                    ],
+                    "policyObject": "tool:mcp",
+                    "policyAction": "execute",
+                },
                 {
                     "id": "report",
                     "role": "role:data-admin",

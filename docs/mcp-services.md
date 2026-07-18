@@ -24,10 +24,14 @@ posture.
 
 ```mermaid
 flowchart LR
-    orchestrator["Orchestrator<br/>McpRegistry<br/>(MCP_SERVICES)"] -->|"discover: mcp-card,<br/>initialize, tools/list"| worldmcp["world-mcp :8010"]
+    agents["Agent services<br/>(decision: tool=mcp)"] --> orchestrator["Orchestrator<br/>McpRegistry (MCP_SERVICES)<br/>Casbin: tool:mcp + datasource"]
+    orchestrator -->|"discover: mcp-card,<br/>initialize, tools/list"| worldmcp["world-mcp :8010"]
     orchestrator -->|"discover"| procmcp["procurement-mcp :8011"]
-    client["Any MCP caller<br/>(tools/call)"] --> worldmcp
-    client --> procmcp
+    orchestrator -->|"tool.requested"| kafka["Kafka"]
+    kafka --> worker["mcp-worker<br/>routes by input.server"]
+    worker -->|"tools/call"| worldmcp
+    worker -->|"tools/call"| procmcp
+    worker -->|"tool.completed"| kafka --> orchestrator
     worldmcp -->|"POST /query"| worldplane["world-db-access :8006<br/>world credentials only"]
     procmcp -->|"POST /query"| procplane["procurement-db-access :8007<br/>procurement credentials only"]
 ```
@@ -60,6 +64,52 @@ tool and returns the MCP result (`content`, `structuredContent`, `isError`).
 Tool-level failures come back as `isError: true` results — the caller decides
 how to treat them — while transport and protocol failures raise
 `McpServiceError`.
+
+## Agent tool decisions through MCP
+
+Agents can route a run's tool step to an MCP server by returning a normal
+`tool` decision whose tool is `mcp` and whose `tool_input` addresses the
+target:
+
+```json
+{
+  "action": "tool",
+  "tool": "mcp",
+  "required_permission": "world-db",
+  "tool_input": {
+    "server": "world-mcp",
+    "name": "country_overview",
+    "arguments": {"country_code": "THA"}
+  }
+}
+```
+
+The flow is identical to the `sql` and `report` tools — MCP is just another
+tool on the same policy-enforced bus:
+
+1. The orchestrator enforces Casbin exactly as for any tool decision:
+   `datasource:<required_permission> read` plus `tool:mcp execute`. A failed
+   check denies the run with the usual audit event.
+2. It publishes `tool.requested` with the MCP target in `input`.
+3. The MCP worker (`apps/workers/mcp_worker.py`, consumer group
+   `mcp-tool-service`) resolves `input.server` against its own `McpRegistry`
+   (built from the same `MCP_SERVICES` spec) and invokes `tools/call`,
+   forwarding `x-tenant-id` / `x-user-id` so RLS still applies at the data
+   plane. An unregistered server fails the run explicitly — mirroring the SQL
+   worker's unknown-database handling — and never guesses a target.
+4. The worker publishes `tool.completed`: on success the result is
+   `{"server", "tool", "output"}` (with `output` taken from
+   `structuredContent`); an `isError` tool result or a transport/protocol
+   failure fails the run with the error text.
+
+Because tool-broker callbacks reuse the same `tool.requested` pipeline,
+long-running `async` agents can call MCP tools mid-run through
+`ToolBrokerClient.run_tool("mcp", {...}, required_permission=...)` with no
+extra plumbing.
+
+The shipped agents demonstrate the path end to end: the world agent's
+`country` action calls `world-mcp`'s `country_overview`, and the procurement
+agent's `risk` action calls `procurement-mcp`'s `supplier_spend_summary`.
 
 ## MCP service contract
 
@@ -149,11 +199,15 @@ plane's parser remains the final guard.
    `app = create_mcp_app(DEFINITION)` — or implement the contract above in
    any stack.
 2. Add a compose service running it on its own port with a `/health` check.
-3. Append `server-id=base-url` to `MCP_SERVICES` on the orchestrator.
+3. Append `server-id=base-url` to `MCP_SERVICES` on the orchestrator **and**
+   the MCP worker (they read the same variable).
 4. If its tools read a database, point it at the data plane that owns that
    database (never at the database itself) and advertise the matching
    permission via `required_permission` so Casbin policy can be aligned.
-5. Verify discovery with `GET /internal/mcp` on the orchestrator.
+5. Grant `tool:mcp execute` (plus the needed `datasource:* read`) to the
+   roles whose agents should reach it.
+6. Verify discovery with `GET /internal/mcp` on the orchestrator; agents can
+   then target it with `tool="mcp"` decisions.
 
 ## Production notes
 
