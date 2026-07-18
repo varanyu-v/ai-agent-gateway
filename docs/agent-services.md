@@ -55,9 +55,10 @@ The run lifecycle:
    publishes `tool.requested`, records `requires_approval`, denies with an
    audit event, or — for `async` decisions — leaves the run `running` while
    the agent drives it through the tool-broker callback API.
-6. For a SQL tool, the worker routes `POST /query` to the data plane that owns
-   the requested database (via `DATA_PLANES`); that plane runs the final SQL
-   guard against its own database. Tool completion flows back through Kafka.
+6. The MCP worker routes the `tool.requested` event to the MCP server named in
+   the decision (via `MCP_SERVICES`); data-reading tools delegate `POST /query`
+   to the data plane that owns the database, which runs the final SQL guard.
+   Tool completion flows back through Kafka.
 
 ## Agent registry
 
@@ -236,9 +237,9 @@ Python agents get `ToolBrokerClient` from `apps/agents/runtime.py`
 `run_async` hook on `AgentDefinition`: return `action="async"` from `decide`
 and the runtime schedules `run_async(request, broker)` in the background,
 reporting completion or failure automatically. The world agent's "market
-brief" flow (SQL lookup, then a report built from its rows) is the reference
-implementation. Configure the callback target with `ORCHESTRATOR_CALLBACK_URL`
-(defaults to `ORCH_URL`).
+brief" flow (a `world-mcp` city lookup, then a `report-mcp` report built from
+its rows) is the reference implementation. Configure the callback target with
+`ORCHESTRATOR_CALLBACK_URL` (defaults to `ORCH_URL`).
 
 ## Per-agent data planes
 
@@ -247,16 +248,12 @@ small service built on `apps/data_access/runtime.py` that holds credentials for
 **only** its own database and enforces the last-mile SQL guard. The two shipped
 planes are `world-db-access` (:8006) and `procurement-db-access` (:8007).
 
-The SQL worker owns no credentials either. It reads `DATA_PLANES`
-(`database=base-url` pairs, the same shape as `AGENT_SERVICES`) and routes each
-`tool.requested` SQL event to the plane that owns `tool_input.database`:
-
-```bash
-DATA_PLANES=world=http://world-db-access:8006,procurement=http://procurement-db-access:8007
-```
-
-If no plane owns the requested database, the worker fails the run rather than
-routing the query elsewhere.
+Agents reach the planes only through MCP: every executable decision names the
+`mcp` tool, the MCP worker routes it to the named MCP server (via
+`MCP_SERVICES`), and the server's tools build guarded SELECTs that delegate to
+their one data plane (see `docs/mcp-services.md`). If no MCP server is
+registered for a decision's server id, the worker fails the run rather than
+guessing.
 
 ### `POST /query`
 
@@ -305,13 +302,15 @@ source may be read; the data plane guarantees *how* it is read.
 2. Add a compose service running it on its own port with a `/health` check.
 3. Append `agent-id=base-url` to `AGENT_SERVICES` on the orchestrator.
 4. Add Casbin rules: `agent:<agent-id>` `invoke` for the intended roles, plus
-   any `datasource:*` / `tool:*` rules its decisions require.
+   any `datasource:*` / `mcp:*` rules its decisions require.
 5. If the agent reads a new database, add a data plane under
    `apps/data_access/<name>/main.py` (an `AgentDataPlane` definition holding
-   only that database's URL env + table allowlist), run it as its own compose
-   service, and append `database=base-url` to `DATA_PLANES` on the SQL worker.
-6. If the agent needs a new non-SQL tool, add a worker consuming
-   `tool.requested` for that tool; the orchestrator and gateway need no changes.
+   only that database's URL env + table allowlist) and an MCP server under
+   `apps/mcp/<name>/main.py` whose tools delegate to it; run both as compose
+   services and append `server-id=base-url` to `MCP_SERVICES`.
+6. If the agent needs a new non-database capability, expose it as an MCP tool
+   on a new or existing server; the orchestrator, worker, and gateway need no
+   code changes.
 
 ## Production notes
 
@@ -329,7 +328,7 @@ source may be read; the data plane guarantees *how* it is read.
   secret with per-agent credentials or mTLS so one team's agent cannot
   impersonate another's; run state (including callback tool calls) is
   in-memory and should move to a durable store.
-- Data planes also listen on the internal network only; only the SQL worker
+- Data planes also listen on the internal network only; only the MCP servers
   should reach them. Each holds credentials for a single database, so database
   credentials no longer live in the shared app environment — they are scoped to
   the one plane that needs them. Give each plane a distinct least-privilege

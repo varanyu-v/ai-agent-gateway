@@ -151,9 +151,13 @@ class OrchestratorLangfuseTraceTests(unittest.TestCase):
                         {
                             "request_id": "request-2",
                             "workflow": "world",
-                            "tool": "sql",
-                            "tool_call_id": "request-2:sql:1",
-                            "input": {"database": "world", "sql": "select 1"},
+                            "tool": "mcp",
+                            "tool_call_id": "request-2:mcp:1",
+                            "input": {
+                                "server": "world-mcp",
+                                "name": "list_top_cities",
+                                "arguments": {"limit": 1},
+                            },
                         },
                     )
 
@@ -162,12 +166,16 @@ class OrchestratorLangfuseTraceTests(unittest.TestCase):
                     {
                         "request_id": "request-2",
                         "workflow": "world",
-                        "tool": "sql",
-                        "tool_call_id": "request-2:sql:1",
+                        "tool": "mcp",
+                        "tool_call_id": "request-2:mcp:1",
                         "status": "completed",
-                        "result": {"rows": [{"value": 1}]},
+                        "result": {
+                            "server": "world-mcp",
+                            "tool": "list_top_cities",
+                            "output": {"rows": [{"value": 1}], "row_count": 1},
+                        },
                     },
-                    "SQL tool completed with 1 row(s).",
+                    "MCP tool 'list_top_cities' completed with 1 row(s).",
                 )
         finally:
             otel_context.detach(token)
@@ -175,7 +183,7 @@ class OrchestratorLangfuseTraceTests(unittest.TestCase):
         tool_call = langfuse_tracer.start_span.call_args_list[1]
         tool_attributes = tool_call.kwargs["attributes"]
         self.assertEqual(tool_attributes["langfuse.observation.metadata.kind"], "tool")
-        self.assertIn("select 1", tool_attributes["langfuse.observation.input"])
+        self.assertIn("list_top_cities", tool_attributes["langfuse.observation.input"])
 
         result_attributes = tool_span.set_attributes.call_args.args[0]
         self.assertIn("completed", result_attributes["langfuse.trace.output"])
@@ -183,7 +191,7 @@ class OrchestratorLangfuseTraceTests(unittest.TestCase):
         tool_span.end.assert_called_once_with()
         self.assertNotIn("request-2", orchestrator.LANGFUSE_RUN_TRACES)
         self.assertNotIn(
-            "request-2:sql:1",
+            "request-2:mcp:1",
             orchestrator.LANGFUSE_TOOL_TRACES,
         )
 

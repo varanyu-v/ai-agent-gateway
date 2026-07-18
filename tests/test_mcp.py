@@ -5,6 +5,7 @@ import httpx
 
 from apps.mcp import runtime
 from apps.mcp.procurement.main import DEFINITION as procurement_definition
+from apps.mcp.report.main import DEFINITION as report_definition
 from apps.mcp.world.main import DEFINITION as world_definition
 from apps.mcp.world.main import app as world_app
 from apps.orchestrator.mcp_registry import (
@@ -233,6 +234,51 @@ class McpToolExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bad_continent.json()["result"]["isError"])
         self.assertIn("Atlantis", bad_continent.json()["result"]["content"][0]["text"])
         self.assertEqual(plane.requests, [])
+
+    async def test_generate_report_queues_job_with_request_scoped_id(self) -> None:
+        app = runtime.create_mcp_app(report_definition)
+        async with mcp_client(app) as client:
+            response = await client.post(
+                "/mcp",
+                json=rpc(
+                    "tools/call",
+                    {
+                        "name": "generate_report",
+                        "arguments": {
+                            "report_type": "world_market_brief",
+                            "database": "world",
+                            "source_rows": 3,
+                        },
+                    },
+                ),
+                headers={**IDENTITY_HEADERS, "x-request-id": "req-9"},
+            )
+
+        result = response.json()["result"]
+        self.assertFalse(result["isError"])
+        output = result["structuredContent"]
+        self.assertEqual(output["report_id"], "req-9-world_market_brief")
+        self.assertEqual(output["status"], "queued")
+        self.assertTrue(output["download_url"].endswith(".pdf"))
+
+    async def test_generate_report_rejects_invalid_report_type(self) -> None:
+        app = runtime.create_mcp_app(report_definition)
+        async with mcp_client(app) as client:
+            response = await client.post(
+                "/mcp",
+                json=rpc(
+                    "tools/call",
+                    {
+                        "name": "generate_report",
+                        "arguments": {"report_type": "DROP TABLE reports"},
+                    },
+                ),
+                headers=IDENTITY_HEADERS,
+            )
+
+        result = response.json()["result"]
+        self.assertTrue(result["isError"])
+        self.assertIn("report_type", result["content"][0]["text"])
 
     async def test_plane_refusal_surfaces_as_tool_error(self) -> None:
         plane = FakeDataPlane(status_code=403)

@@ -170,9 +170,13 @@ class AssistantRunTests(RouterTestCase):
             invoked.append(agent.agent_id)
             return {
                 "action": "tool",
-                "tool": "sql",
+                "tool": "mcp",
                 "required_permission": "world-db",
-                "tool_input": {"database": "world", "sql": "select 1"},
+                "tool_input": {
+                    "server": "world-mcp",
+                    "name": "list_top_cities",
+                    "arguments": {"limit": 1},
+                },
             }
 
         with patch.object(orchestrator, "invoke_agent_service", fake_invoke):

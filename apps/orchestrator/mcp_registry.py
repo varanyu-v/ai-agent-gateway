@@ -24,13 +24,14 @@ from apps.orchestrator.registry import parse_agent_services
 
 
 DEFAULT_MCP_SERVICES = (
-    "world-mcp=http://localhost:8010,procurement-mcp=http://localhost:8011"
+    "world-mcp=http://localhost:8010,procurement-mcp=http://localhost:8011,"
+    "report-mcp=http://localhost:8012"
 )
 
 # MCP specification revision this client speaks.
 MCP_PROTOCOL_VERSION = "2025-06-18"
 
-# Same `id=base-url` spec shape as AGENT_SERVICES and DATA_PLANES.
+# Same `id=base-url` spec shape as AGENT_SERVICES.
 parse_mcp_services = parse_agent_services
 
 

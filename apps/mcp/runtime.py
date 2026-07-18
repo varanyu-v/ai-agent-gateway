@@ -59,6 +59,7 @@ class McpToolContext:
     tenant_id: str | None
     user_id: str | None
     http: httpx.AsyncClient
+    request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +334,7 @@ def create_mcp_app(
         request: Request,
         x_tenant_id: str | None = Header(default=None),
         x_user_id: str | None = Header(default=None),
+        x_request_id: str | None = Header(default=None),
     ) -> Response:
         try:
             payload = await request.json()
@@ -343,6 +345,7 @@ def create_mcp_app(
             tenant_id=x_tenant_id,
             user_id=x_user_id,
             http=outbound_http(),
+            request_id=x_request_id,
         )
         return await dispatch_rpc(definition, tracer, payload, context)
 

@@ -87,23 +87,32 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()
 
-    async def test_world_agent_routes_lookup_to_sql_tool(self) -> None:
+    async def test_world_agent_routes_lookup_to_world_mcp(self) -> None:
         body = await self.run_agent(world_app, "show the largest cities")
         decision = body["decision"]
         self.assertEqual(body["workflow"], "world")
         self.assertEqual(decision["action"], "tool")
-        self.assertEqual(decision["tool"], "sql")
+        self.assertEqual(decision["tool"], "mcp")
         self.assertEqual(decision["required_permission"], "world-db")
-        self.assertEqual(decision["tool_input"]["database"], "world")
+        self.assertEqual(
+            decision["tool_input"],
+            {
+                "server": "world-mcp",
+                "name": "list_top_cities",
+                "arguments": {"limit": 10},
+            },
+        )
         self.assertEqual(decision["planner_source"], "fallback")
 
-    async def test_world_agent_routes_report_requests_to_report_tool(self) -> None:
+    async def test_world_agent_routes_report_requests_to_report_mcp(self) -> None:
         body = await self.run_agent(world_app, "generate a world market entry report")
         decision = body["decision"]
         self.assertEqual(decision["action"], "tool")
-        self.assertEqual(decision["tool"], "report")
+        self.assertEqual(decision["tool"], "mcp")
+        self.assertEqual(decision["tool_input"]["server"], "report-mcp")
+        self.assertEqual(decision["tool_input"]["name"], "generate_report")
         self.assertEqual(
-            decision["tool_input"]["report_type"],
+            decision["tool_input"]["arguments"]["report_type"],
             "world_market_summary",
         )
 
@@ -114,14 +123,21 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision["audit_event"], "human_approval_required")
         self.assertIsNone(decision["tool"])
 
-    async def test_procurement_agent_routes_lookup_to_sql_tool(self) -> None:
+    async def test_procurement_agent_routes_lookup_to_procurement_mcp(self) -> None:
         body = await self.run_agent(procurement_app, "rank suppliers by spend")
         decision = body["decision"]
         self.assertEqual(body["workflow"], "procurement")
         self.assertEqual(decision["action"], "tool")
-        self.assertEqual(decision["tool"], "sql")
+        self.assertEqual(decision["tool"], "mcp")
         self.assertEqual(decision["required_permission"], "procurement-db")
-        self.assertEqual(decision["tool_input"]["database"], "procurement")
+        self.assertEqual(
+            decision["tool_input"],
+            {
+                "server": "procurement-mcp",
+                "name": "supplier_spend_summary",
+                "arguments": {"limit": 10},
+            },
+        )
 
     async def test_procurement_agent_routes_destructive_requests_to_approval(self) -> None:
         body = await self.run_agent(
@@ -181,13 +197,15 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
 class OrchestratorBrokerStub:
     """Simulates the orchestrator's tool-broker API behind httpx.MockTransport.
 
-    Each tool call answers one poll with "requested" before settling with the
+    Outcomes are keyed by the MCP tool name in the request's tool_input. Each
+    tool call answers one poll with "requested" before settling with the
     configured outcome, so client polling is actually exercised.
     """
 
     def __init__(self, results: dict[str, dict]) -> None:
         self.results = results
         self.seq = 0
+        self.outcomes: dict[str, dict] = {}
         self.pending_polls: dict[str, int] = {}
         self.completed_with: dict | None = None
 
@@ -200,15 +218,16 @@ class OrchestratorBrokerStub:
             return httpx.Response(200, json={"status": "ok"})
         if request.method == "POST" and path.endswith("/tool-calls"):
             body = json.loads(request.content.decode())
-            tool = body["tool"]
-            outcome = self.results.get(tool)
+            name = (body.get("tool_input") or {}).get("name") or body["tool"]
+            outcome = self.results.get(name)
             if outcome is not None and outcome.get("status_code"):
                 return httpx.Response(
                     outcome["status_code"],
                     json={"detail": outcome["detail"]},
                 )
             self.seq += 1
-            tool_call_id = f"req-1:{tool}:{self.seq}"
+            tool_call_id = f"req-1:{body['tool']}:{self.seq}"
+            self.outcomes[tool_call_id] = outcome or {}
             self.pending_polls[tool_call_id] = 1
             return httpx.Response(
                 200,
@@ -220,7 +239,6 @@ class OrchestratorBrokerStub:
             )
         if request.method == "GET" and "/tool-calls/" in path:
             tool_call_id = path.rsplit("/", 1)[-1]
-            tool = tool_call_id.split(":")[1]
             if self.pending_polls.get(tool_call_id, 0) > 0:
                 self.pending_polls[tool_call_id] -= 1
                 return httpx.Response(
@@ -229,7 +247,11 @@ class OrchestratorBrokerStub:
                 )
             return httpx.Response(
                 200,
-                json={"tool_call_id": tool_call_id, "tool": tool, **self.results[tool]},
+                json={
+                    "tool_call_id": tool_call_id,
+                    "tool": "mcp",
+                    **self.outcomes[tool_call_id],
+                },
             )
         return httpx.Response(404, json={"detail": "not found"})
 
@@ -246,11 +268,25 @@ class ToolBrokerClientTests(unittest.IsolatedAsyncioTestCase):
             transport=httpx.MockTransport(stub.handler),
         )
 
-    async def test_market_brief_drives_sql_then_report_and_completes(self) -> None:
+    async def test_market_brief_drives_lookup_then_report_and_completes(self) -> None:
         stub = OrchestratorBrokerStub(
             {
-                "sql": {"status": "completed", "result": {"rows": [{"city": "a"}] * 3}},
-                "report": {"status": "completed", "result": {"report_id": "report-9"}},
+                "list_top_cities": {
+                    "status": "completed",
+                    "result": {
+                        "server": "world-mcp",
+                        "tool": "list_top_cities",
+                        "output": {"rows": [{"city": "a"}] * 3, "row_count": 3},
+                    },
+                },
+                "generate_report": {
+                    "status": "completed",
+                    "result": {
+                        "server": "report-mcp",
+                        "tool": "generate_report",
+                        "output": {"report_id": "report-9", "status": "queued"},
+                    },
+                },
             },
         )
         request = runtime.AgentRunRequest(
@@ -267,7 +303,7 @@ class ToolBrokerClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_tool_reports_run_failure(self) -> None:
         stub = OrchestratorBrokerStub(
-            {"sql": {"status": "failed", "output": "Tool execution failed."}},
+            {"list_top_cities": {"status": "failed", "output": "Tool execution failed."}},
         )
         request = runtime.AgentRunRequest(
             **{**RUN_PAYLOAD, "message": "prepare a world market brief"},
@@ -282,7 +318,7 @@ class ToolBrokerClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_denied_tool_call_raises_broker_error_with_detail(self) -> None:
         stub = OrchestratorBrokerStub(
             {
-                "sql": {
+                "list_top_cities": {
                     "status_code": 403,
                     "detail": "User cannot use data source permission: world-db",
                 },
@@ -290,7 +326,15 @@ class ToolBrokerClientTests(unittest.IsolatedAsyncioTestCase):
         )
         async with self.broker_client(stub) as client:
             with self.assertRaises(runtime.ToolBrokerError) as raised:
-                await client.run_tool("sql", {"database": "world"}, "world-db")
+                await client.run_tool(
+                    "mcp",
+                    {
+                        "server": "world-mcp",
+                        "name": "list_top_cities",
+                        "arguments": {"limit": 10},
+                    },
+                    "world-db",
+                )
         self.assertEqual(raised.exception.status_code, 403)
         self.assertIn("world-db", raised.exception.detail)
 
@@ -326,7 +370,7 @@ class AgentRegistryTests(unittest.IsolatedAsyncioTestCase):
                         "agent_id": "world-agent",
                         "request_id": body["request_id"],
                         "workflow": "world",
-                        "decision": {"action": "tool", "tool": "sql"},
+                        "decision": {"action": "tool", "tool": "mcp"},
                     },
                 )
             return httpx.Response(404)
@@ -340,7 +384,7 @@ class AgentRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(agent.name, "World Analyst Agent")
 
             response = await registry.invoke_run(agent, RUN_PAYLOAD)
-            self.assertEqual(response["decision"]["tool"], "sql")
+            self.assertEqual(response["decision"]["tool"], "mcp")
 
             self.assertIsNone(registry.get("unknown-agent"))
         finally:

@@ -789,8 +789,8 @@
           <span>Carry requested and completed tool events.</span>
         </div>
         <div class="flow-step">
-          <strong>5. Workers</strong>
-          <span>Run SQL or report work against the sample services.</span>
+          <strong>5. MCP worker</strong>
+          <span>Routes tool calls to the MCP services behind the data planes.</span>
         </div>
       </section>
 
@@ -809,7 +809,7 @@
                 <li>Select a seeded user and press <span class="inline-code">Login</span>.</li>
                 <li>Pick an agent and sample message.</li>
                 <li>Press <span class="inline-code">Run agent</span> and inspect the JSON response.</li>
-                <li>Watch worker activity with <code>docker compose logs -f orchestrator sql-worker report-worker db-access</code>.</li>
+                <li>Watch worker activity with <code>docker compose logs -f orchestrator mcp-worker world-mcp procurement-mcp report-mcp</code>.</li>
               </ol>
             </div>
           </section>
@@ -832,11 +832,11 @@
                 <tbody>
                   <tr>
                     <td>world-analyst</td>
-                    <td>World DB SQL and report succeed; procurement access is blocked.</td>
+                    <td>World DB lookups and reports succeed; procurement access is blocked.</td>
                   </tr>
                   <tr>
                     <td>procurement-analyst</td>
-                    <td>Procurement DB SQL succeeds; World DB is denied.</td>
+                    <td>Procurement DB lookups succeed; World DB and reports are denied.</td>
                   </tr>
                   <tr>
                     <td>source-auditor</td>
@@ -967,7 +967,7 @@
               </div>
               <div class="sql-output" id="sqlOutput" hidden>
                 <div class="sql-output-header">
-                  <span>SQL response</span>
+                  <span>Tool response</span>
                   <span class="pill" id="sqlStatus">Waiting</span>
                 </div>
                 <div class="sql-output-body" id="sqlOutputBody"></div>
@@ -1023,8 +1023,8 @@
           user: "world-analyst",
           message: "show the largest cities by population with country context",
           description:
-            "Queries the World DB source and returns city, country, continent, district, and population rows.",
-          tool: "sql",
+            "Queries the World DB source through world-mcp and returns city, country, continent, district, and population rows.",
+          tool: "world-mcp",
           expected: "World DB rows",
           requiredPermission: "world-db",
         },
@@ -1034,9 +1034,9 @@
           user: "world-analyst",
           message: "generate a world market entry report",
           description:
-            "Exercises the report worker through the World DB permission path without granting procurement access.",
-          tool: "report",
-          expected: "Report ready",
+            "Exercises the report MCP service through the World DB permission path without granting procurement access.",
+          tool: "report-mcp",
+          expected: "Report queued",
           requiredPermission: "world-db",
         },
         {
@@ -1045,8 +1045,8 @@
           user: "procurement-analyst",
           message: "rank suppliers by total purchase spend and risk",
           description:
-            "Queries the second procurement database and ranks suppliers by spend, order count, and risk level.",
-          tool: "sql",
+            "Queries the second procurement database through procurement-mcp and ranks suppliers by spend, order count, and risk level.",
+          tool: "procurement-mcp",
           expected: "Supplier spend rows",
           requiredPermission: "procurement-db",
         },
@@ -1057,7 +1057,7 @@
           message: "rank suppliers by total purchase spend and risk",
           description:
             "Proves agent access and database permission are separate by calling procurement without procurement-db read.",
-          tool: "sql",
+          tool: "procurement-mcp",
           expected: "Permission denied",
           allowedExpected: "Supplier spend rows",
           deniedExpected: "Permission denied",
@@ -1339,8 +1339,8 @@
         if (run.status === "approved") {
           return "Human approval was recorded.";
         }
-        if (run.tool === "sql" && Array.isArray(run.result?.rows)) {
-          return `SQL tool completed with ${run.result.rows.length} row(s).`;
+        if (run.tool === "mcp" && Array.isArray(run.result?.output?.rows)) {
+          return `MCP tool '${run.result.tool}' completed with ${run.result.output.rows.length} row(s).`;
         }
         if (run.status === "running" || run.status === "requested") {
           return "Agent accepted the request and is waiting for tool output.";
@@ -1426,37 +1426,42 @@
           run.status === "requires_approval",
         );
 
-        if (run.tool !== "sql") {
+        if (run.tool !== "mcp") {
           if (run.status === "running" || run.status === "requested") {
-            showSqlMessage("Waiting for a SQL tool response...");
+            showSqlMessage("Waiting for a tool response...");
           } else if (run.status === "denied") {
-            showSqlMessage(run.denied_reason || "Request was denied before SQL ran.", "error");
+            showSqlMessage(run.denied_reason || "Request was denied before any tool ran.", "error");
           } else if (run.status === "requires_approval") {
-            showSqlMessage("This request requires approval, so no SQL response was produced.");
+            showSqlMessage("This request requires approval, so no tool response was produced.");
           } else if (run.status === "approved") {
-            showSqlMessage("Human approval recorded. No SQL response was produced.");
+            showSqlMessage("Human approval recorded. No tool response was produced.");
           } else if (run.tool) {
-            showSqlMessage(`Completed tool was ${run.tool}, not sql.`);
+            showSqlMessage(`Completed tool was ${run.tool}, not mcp.`);
           }
           return;
         }
 
         if (run.status === "failed") {
-          showSqlMessage(pretty(run.result || { error: "SQL tool failed" }), "error");
+          showSqlMessage(pretty(run.result || { error: "MCP tool failed" }), "error");
           return;
         }
 
-        const rows = run.result?.rows;
+        const rows = run.result?.output?.rows;
         if (Array.isArray(rows)) {
           if (rows.length === 0) {
-            showSqlMessage("SQL completed successfully and returned 0 rows.", "ok");
+            showSqlMessage("The MCP tool completed successfully and returned 0 rows.", "ok");
           } else {
             renderSqlRows(rows);
           }
           return;
         }
 
-        showSqlMessage("SQL tool is still running...");
+        if (run.result?.output) {
+          showSqlMessage(pretty(run.result.output), "ok");
+          return;
+        }
+
+        showSqlMessage("The MCP tool is still running...");
       }
 
       function isTerminalRunStatus(status) {
@@ -1488,7 +1493,7 @@
               800,
             );
           } else if (!isTerminalRunStatus(run.status)) {
-            showSqlMessage("Still waiting for SQL response. Check worker logs if this takes longer.");
+            showSqlMessage("Still waiting for the tool response. Check mcp-worker logs if this takes longer.");
           }
         } catch (error) {
           showSqlMessage(`Run status polling failed: ${error.message}`, "error");
@@ -1807,7 +1812,7 @@
           els.responseOutput.textContent = pretty({
             initial_response: state.initialResponse,
             next_log_check:
-              "docker compose logs -f orchestrator sql-worker report-worker db-access",
+              "docker compose logs -f orchestrator mcp-worker world-mcp procurement-mcp report-mcp",
           });
 
           if (!response.ok) {
@@ -1818,7 +1823,7 @@
               state.currentInput,
               data.denied_reason || "Request was denied before tool execution.",
             );
-            showSqlMessage(data.denied_reason || "Request was denied before SQL ran.", "error");
+            showSqlMessage(data.denied_reason || "Request was denied before any tool ran.", "error");
             setMessage("Request reached the orchestrator and was denied by tool permissions.", "error");
           } else if (data.status === "requires_approval") {
             renderAgentIo(
@@ -1826,15 +1831,15 @@
               "Human approval is required before this request can continue.",
               true,
             );
-            showSqlMessage("This request requires approval, so no SQL response was produced.");
+            showSqlMessage("This request requires approval, so no tool response was produced.");
             setMessage("Request reached the orchestrator and requires approval.");
           } else {
             renderAgentIo(
               state.currentInput,
               "Agent accepted the request and is waiting for tool output.",
             );
-            showSqlMessage("Waiting for SQL worker response...");
-            setMessage("Request accepted. Waiting for SQL response from the worker.", "ok");
+            showSqlMessage("Waiting for the MCP worker response...");
+            setMessage("Request accepted. Waiting for the tool response from the MCP worker.", "ok");
             pollRunStatus(state.currentRunId);
           }
         } catch (error) {

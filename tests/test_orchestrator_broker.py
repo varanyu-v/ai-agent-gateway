@@ -101,24 +101,29 @@ class AsyncDecisionTests(ToolBrokerTestCase):
 class ToolCallEndpointTests(ToolBrokerTestCase):
     async def test_agent_requests_tool_then_completion_flows_back(self) -> None:
         seed_callback_run()
+        tool_input = {
+            "server": "world-mcp",
+            "name": "list_top_cities",
+            "arguments": {"limit": 1},
+        }
         async with orchestrator_client() as client:
             response = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
                 json={
-                    "tool": "sql",
-                    "tool_input": {"database": "world", "sql": "select 1"},
+                    "tool": "mcp",
+                    "tool_input": tool_input,
                     "required_permission": "world-db",
                 },
             )
             self.assertEqual(response.status_code, 200)
             tool_call_id = response.json()["tool_call_id"]
-            self.assertEqual(tool_call_id, f"{RUN_ID}:sql:1")
+            self.assertEqual(tool_call_id, f"{RUN_ID}:mcp:1")
 
             topic, payload = self.published[-1]
             self.assertEqual(topic, "tool.requested")
             self.assertEqual(payload["tool_call_id"], tool_call_id)
-            self.assertEqual(payload["input"], {"database": "world", "sql": "select 1"})
+            self.assertEqual(payload["input"], tool_input)
             self.assertEqual(payload["tenant_id"], "demo-tenant")
 
             pending = await client.get(
@@ -127,13 +132,18 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
             )
             self.assertEqual(pending.json()["status"], "requested")
 
+            tool_result = {
+                "server": "world-mcp",
+                "tool": "list_top_cities",
+                "output": {"rows": [{"value": 1}], "row_count": 1},
+            }
             orchestrator.handle_tool_completed_event(
                 {
                     "request_id": RUN_ID,
-                    "tool": "sql",
+                    "tool": "mcp",
                     "tool_call_id": tool_call_id,
                     "status": "completed",
-                    "result": {"rows": [{"value": 1}]},
+                    "result": tool_result,
                 },
             )
 
@@ -142,7 +152,7 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
                 headers=AGENT_HEADERS,
             )
             self.assertEqual(settled.json()["status"], "completed")
-            self.assertEqual(settled.json()["result"], {"rows": [{"value": 1}]})
+            self.assertEqual(settled.json()["result"], tool_result)
             # A settled tool call must not flip the whole run out of running.
             self.assertEqual(orchestrator.RUNS[RUN_ID]["status"], "running")
 
@@ -160,7 +170,7 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
         body = status.json()
         self.assertEqual(body["status"], "completed")
         self.assertEqual(body["output"], "Brief is ready.")
-        self.assertIn(f"{RUN_ID}:sql:1", body["tool_calls"])
+        self.assertIn(f"{RUN_ID}:mcp:1", body["tool_calls"])
         self.assertIn("audit.events", self.published_topics())
         self.assertEqual(self.published[-1][1]["event"], "agent_callback_run_completed")
 
@@ -170,15 +180,25 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
             first = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
-                json={"tool": "sql", "tool_input": {"database": "world"}},
+                json={
+                    "tool": "mcp",
+                    "tool_input": {"server": "world-mcp", "name": "list_top_cities"},
+                },
             )
             second = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
-                json={"tool": "report", "tool_input": {"report_type": "brief"}},
+                json={
+                    "tool": "mcp",
+                    "tool_input": {
+                        "server": "report-mcp",
+                        "name": "generate_report",
+                        "arguments": {"report_type": "brief"},
+                    },
+                },
             )
-        self.assertEqual(first.json()["tool_call_id"], f"{RUN_ID}:sql:1")
-        self.assertEqual(second.json()["tool_call_id"], f"{RUN_ID}:report:2")
+        self.assertEqual(first.json()["tool_call_id"], f"{RUN_ID}:mcp:1")
+        self.assertEqual(second.json()["tool_call_id"], f"{RUN_ID}:mcp:2")
         self.assertEqual(len(orchestrator.RUNS[RUN_ID]["tool_calls"]), 2)
 
     async def test_tool_call_denied_without_permission(self) -> None:
@@ -188,8 +208,8 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
                 json={
-                    "tool": "sql",
-                    "tool_input": {"database": "world"},
+                    "tool": "mcp",
+                    "tool_input": {"server": "world-mcp", "name": "list_top_cities"},
                     "required_permission": "world-db",
                 },
             )
@@ -200,15 +220,31 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
         # The run stays running: the agent decides how to proceed or fail.
         self.assertEqual(orchestrator.RUNS[RUN_ID]["status"], "running")
 
-    async def test_tool_call_denied_for_disallowed_tool(self) -> None:
+    async def test_tool_call_denied_for_disallowed_mcp_server(self) -> None:
         seed_callback_run(policy_subjects=["role:procurement-analyst"])
         async with orchestrator_client() as client:
             response = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
-                json={"tool": "report", "tool_input": {}},
+                json={
+                    "tool": "mcp",
+                    "tool_input": {"server": "report-mcp", "name": "generate_report"},
+                },
             )
         self.assertEqual(response.status_code, 403)
+        self.assertIn("mcp:report-mcp", response.json()["detail"])
+        self.assertEqual(self.published[0][1]["event"], "tool_access_denied")
+
+    async def test_tool_call_denied_for_non_mcp_tool(self) -> None:
+        seed_callback_run()
+        async with orchestrator_client() as client:
+            response = await client.post(
+                f"/internal/runs/{RUN_ID}/tool-calls",
+                headers=AGENT_HEADERS,
+                json={"tool": "sql", "tool_input": {"database": "world"}},
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("sql", response.json()["detail"])
         self.assertEqual(self.published[0][1]["event"], "tool_access_denied")
 
     async def test_callback_requires_matching_agent(self) -> None:
@@ -217,7 +253,7 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
             response = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers={"x-agent-id": "procurement-agent"},
-                json={"tool": "sql"},
+                json={"tool": "mcp"},
             )
         self.assertEqual(response.status_code, 404)
         self.assertEqual(self.published, [])
@@ -228,23 +264,24 @@ class ToolCallEndpointTests(ToolBrokerTestCase):
             response = await client.post(
                 f"/internal/runs/{RUN_ID}/tool-calls",
                 headers=AGENT_HEADERS,
-                json={"tool": "sql"},
+                json={"tool": "mcp"},
             )
         self.assertEqual(response.status_code, 409)
 
     async def test_callback_token_enforced_when_configured(self) -> None:
         seed_callback_run()
+        tool_input = {"server": "world-mcp", "name": "list_top_cities"}
         with patch.object(orchestrator, "AGENT_CALLBACK_TOKEN", "secret"):
             async with orchestrator_client() as client:
                 missing = await client.post(
                     f"/internal/runs/{RUN_ID}/tool-calls",
                     headers=AGENT_HEADERS,
-                    json={"tool": "sql", "tool_input": {"database": "world"}},
+                    json={"tool": "mcp", "tool_input": tool_input},
                 )
                 allowed = await client.post(
                     f"/internal/runs/{RUN_ID}/tool-calls",
                     headers={**AGENT_HEADERS, "x-callback-token": "secret"},
-                    json={"tool": "sql", "tool_input": {"database": "world"}},
+                    json={"tool": "mcp", "tool_input": tool_input},
                 )
         self.assertEqual(missing.status_code, 401)
         self.assertEqual(allowed.status_code, 200)

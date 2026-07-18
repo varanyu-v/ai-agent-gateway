@@ -33,7 +33,7 @@ class AuthzPolicyTests(unittest.TestCase):
         self.assertFalse(authz.can_invoke_agent(current_user, "procurement-agent"))
         self.assertEqual(authz.allowed_data_sources(current_user), ["world-db"])
 
-    def test_procurement_analyst_can_execute_sql_for_procurement_source(self) -> None:
+    def test_procurement_analyst_can_execute_procurement_mcp(self) -> None:
         current_user = user(
             "procurement-analyst",
             ["role:procurement-analyst"],
@@ -48,8 +48,12 @@ class AuthzPolicyTests(unittest.TestCase):
                 "procurement-db",
             ),
         )
-        self.assertTrue(authz.can_execute_tool(subjects, "demo-tenant", "sql"))
-        self.assertFalse(authz.can_execute_tool(subjects, "demo-tenant", "report"))
+        self.assertTrue(
+            authz.can_execute_mcp_server(subjects, "demo-tenant", "procurement-mcp"),
+        )
+        self.assertFalse(
+            authz.can_execute_mcp_server(subjects, "demo-tenant", "report-mcp"),
+        )
 
     def test_legacy_procurement_roles_map_to_procurement_analyst(self) -> None:
         current_user = user(
@@ -67,8 +71,12 @@ class AuthzPolicyTests(unittest.TestCase):
                 "procurement-db",
             ),
         )
-        self.assertTrue(authz.can_execute_tool(subjects, "demo-tenant", "sql"))
-        self.assertFalse(authz.can_execute_tool(subjects, "demo-tenant", "report"))
+        self.assertTrue(
+            authz.can_execute_mcp_server(subjects, "demo-tenant", "procurement-mcp"),
+        )
+        self.assertFalse(
+            authz.can_execute_mcp_server(subjects, "demo-tenant", "report-mcp"),
+        )
 
     def test_source_auditor_lacks_procurement_source(self) -> None:
         current_user = user(
@@ -125,7 +133,10 @@ class AuthzPolicyTests(unittest.TestCase):
             ["assistant", "procurement-agent", "world-agent"],
         )
         self.assertEqual(authz.allowed_data_sources(current_user), ["world-db"])
-        self.assertEqual(authz.allowed_tools(current_user), ["mcp", "report", "sql"])
+        self.assertEqual(
+            authz.allowed_mcp_servers(current_user),
+            ["report-mcp", "world-mcp"],
+        )
 
     def test_legacy_data_admin_roles_map_to_data_admin(self) -> None:
         current_user = user(
@@ -146,7 +157,9 @@ class AuthzPolicyTests(unittest.TestCase):
             authz.allowed_data_sources(current_user),
             ["procurement-db", "world-db"],
         )
-        self.assertTrue(authz.can_execute_tool(subjects, "demo-tenant", "report"))
+        self.assertTrue(
+            authz.can_execute_mcp_server(subjects, "demo-tenant", "report-mcp"),
+        )
 
     def test_policy_subjects_are_forwarded_without_recreating_permissions(self) -> None:
         self.assertEqual(
@@ -199,41 +212,38 @@ class AuthzPolicyTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            authz.tool_access_rules(),
+            authz.mcp_server_access_rules(),
             [
                 {
-                    "id": "mcp",
+                    "id": "procurement-mcp",
                     "role": "role:data-admin",
                     "roles": [
                         "role:data-admin",
                         "role:procurement-analyst",
-                        "role:source-auditor",
-                        "role:world-analyst",
                     ],
-                    "policyObject": "tool:mcp",
+                    "policyObject": "mcp:procurement-mcp",
                     "policyAction": "execute",
                 },
                 {
-                    "id": "report",
+                    "id": "report-mcp",
                     "role": "role:data-admin",
                     "roles": [
                         "role:data-admin",
                         "role:source-auditor",
                         "role:world-analyst",
                     ],
-                    "policyObject": "tool:report",
+                    "policyObject": "mcp:report-mcp",
                     "policyAction": "execute",
                 },
                 {
-                    "id": "sql",
+                    "id": "world-mcp",
                     "role": "role:data-admin",
                     "roles": [
                         "role:data-admin",
-                        "role:procurement-analyst",
                         "role:source-auditor",
                         "role:world-analyst",
                     ],
-                    "policyObject": "tool:sql",
+                    "policyObject": "mcp:world-mcp",
                     "policyAction": "execute",
                 },
             ],

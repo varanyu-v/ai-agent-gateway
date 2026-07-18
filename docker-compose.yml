@@ -382,7 +382,7 @@ services:
       AGENT_SERVICES: ${AGENT_SERVICES:-world-agent=http://world-agent:8004,procurement-agent=http://procurement-agent:8005}
       AGENT_CONNECT_TIMEOUT_SECONDS: ${AGENT_CONNECT_TIMEOUT_SECONDS:-5}
       AGENT_READ_TIMEOUT_SECONDS: ${AGENT_READ_TIMEOUT_SECONDS:-60}
-      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011}
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011,report-mcp=http://report-mcp:8012}
       MCP_CONNECT_TIMEOUT_SECONDS: ${MCP_CONNECT_TIMEOUT_SECONDS:-5}
       MCP_READ_TIMEOUT_SECONDS: ${MCP_READ_TIMEOUT_SECONDS:-30}
       ROUTER_AGENT_ID: ${ROUTER_AGENT_ID:-assistant}
@@ -542,28 +542,33 @@ services:
       retries: 5
       start_period: 15s
 
-  sql-worker:
+  # Report generation as an MCP job-submission tool. Reads no databases, so it
+  # needs no data-plane dependency.
+  report-mcp:
     <<: *app
-    command: python -m apps.workers.sql_worker
+    command: uvicorn apps.mcp.report.main:app --host 0.0.0.0 --port 8012
     environment:
       <<: *app-env
-      DATA_PLANES: ${DATA_PLANES:-world=http://world-db-access:8006,procurement=http://procurement-db-access:8007}
+    ports:
+      - "8012:8012"
     depends_on:
-      kafka:
-        condition: service_healthy
-      world-db-access:
-        condition: service_healthy
-      procurement-db-access:
-        condition: service_healthy
       otel-collector:
         condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   mcp-worker:
     <<: *app
     command: python -m apps.workers.mcp_worker
     environment:
       <<: *app-env
-      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011}
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011,report-mcp=http://report-mcp:8012}
     depends_on:
       kafka:
         condition: service_healthy
@@ -571,16 +576,7 @@ services:
         condition: service_healthy
       procurement-mcp:
         condition: service_healthy
-      otel-collector:
-        condition: service_started
-
-  report-worker:
-    <<: *app
-    command: python -m apps.workers.report_worker
-    environment:
-      <<: *app-env
-    depends_on:
-      kafka:
+      report-mcp:
         condition: service_healthy
       otel-collector:
         condition: service_started

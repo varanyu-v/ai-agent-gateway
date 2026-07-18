@@ -45,12 +45,12 @@ Recommended first run:
 2. Press `Login`.
 3. Click `World Market Hotspots`.
 4. Press `Run agent`.
-5. Inspect `Agent input`, `Agent output`, `SQL response`, and the raw response JSON.
+5. Inspect `Agent input`, `Agent output`, `Tool response`, and the raw response JSON.
 
 Watch the backend while testing:
 
 ```bash
-docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker world-db-access procurement-db-access
+docker compose logs -f gateway orchestrator world-agent procurement-agent mcp-worker world-mcp procurement-mcp report-mcp world-db-access procurement-db-access
 ```
 
 ## What Is Included
@@ -59,11 +59,11 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent sql-wo
 - `apps/orchestrator`: routes runs to external agent services through an agent registry, enforces Casbin source/tool policy on every agent decision before dispatch, emits Kafka events, tracks run status, and records approvals. Agents are declared in `AGENT_SERVICES` and discovered through their agent cards. Also serves the virtual `assistant` supervisor agent (`apps/orchestrator/router.py`): general questions are answered directly by the LLM, while procurement/world questions are classified and delegated to the matching agent service under the caller's Casbin agent-invoke policy.
 - `apps/agents`: standalone agent services built on a shared runtime (`apps/agents/runtime.py`). Each agent runs its own LangGraph workflow and LiteLLM planner, exposes `/.well-known/agent-card` and `POST /runs`, and returns a decision; it never touches Kafka or databases directly. `apps/agents/world` and `apps/agents/procurement` are the two current agents. See `docs/agent-services.md`.
 - `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
-- `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events. The SQL worker routes each query to the data plane that owns its database, using the `DATA_PLANES` registry. The MCP worker routes `tool="mcp"` calls to the MCP server named in the decision, using the `MCP_SERVICES` registry.
+- `apps/workers`: the MCP worker — the platform's only tool worker. It consumes `tool.requested` events (tool is always `mcp`), routes each call to the MCP server named in the decision using the `MCP_SERVICES` registry, and publishes `tool.completed` events. It holds no credentials; identity headers are forwarded so RLS still applies.
 - `apps/data_access`: per-agent database access layers built on a shared runtime (`apps/data_access/runtime.py`). Each plane holds credentials for only its own database and enforces the final read-only, table-allowlisted, tenant-scoped SQL guard. `apps/data_access/world` (`world-db-access`) and `apps/data_access/procurement` (`procurement-db-access`) are the two current planes.
-- `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world` and `apps/mcp/procurement` are the two example servers. See `docs/mcp-services.md`.
+- `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world`, `apps/mcp/procurement`, and `apps/mcp/report` (report generation as a queued job, no database access) are the three example servers. See `docs/mcp-services.md`.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
-- `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, SQL response rendering, agent input/output, and human approval.
+- `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, tool response rendering, agent input/output, and human approval.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
 - `docker/otel/collector-config.yaml`: local OTLP collector pipeline that forwards traces to Tempo and exposes metrics for Prometheus.
 - `docker/prometheus/prometheus.yml`: Prometheus scrape config for app metrics exported by the collector.
@@ -110,11 +110,13 @@ flowchart TD
 
     subgraph tools["Tool execution"]
         kafka["Kafka<br/>agent.requested<br/>tool.requested<br/>tool.completed<br/>audit.events"]
-        workers["Workers<br/>SQL worker<br/>Report worker"]
+        mcp_worker["MCP worker<br/>routes tool=mcp calls<br/>by MCP_SERVICES"]
+        world_mcp["world-mcp :8010<br/>list_top_cities<br/>country_overview"]
+        procurement_mcp["procurement-mcp :8011<br/>list_recent_purchase_orders<br/>supplier_spend_summary"]
+        report_mcp["report-mcp :8012<br/>generate_report<br/>(queued job, no DB)"]
     end
 
     subgraph db_layer["Per-agent data planes (one per agent)<br/>apps/data_access"]
-        plane_router{"DATA_PLANES route<br/>by database name"}
         world_plane["world-db-access :8006<br/>SQL guard: one read-only SELECT<br/>allow: city, country,<br/>country_language, country_flag<br/>max rows: 500<br/>holds only WORLD_DATABASE_URL"]
         procurement_plane["procurement-db-access :8007<br/>SQL guard: one read-only SELECT<br/>allow: suppliers, purchase_orders,<br/>supplier_summary<br/>max rows: 500<br/>holds only PROCUREMENT_DATABASE_URL"]
         blocked_query["Blocked by data plane<br/>write SQL, multi statement,<br/>foreign DB, or disallowed table"]
@@ -150,18 +152,19 @@ flowchart TD
     world_agent -->|"decision: tool/approval/async"| orchestrator
     world_agent -.->|"tool-broker callbacks (async runs)"| orchestrator
     procurement_agent -->|"decision: tool/approval"| orchestrator
-    orchestrator -->|"missing permission/tool"| denied
+    orchestrator -->|"missing permission/mcp server"| denied
     orchestrator -->|"Tool request events"| kafka
-    kafka -->|"Consume"| workers
-    workers -->|"SQL tool routes to owning plane"| plane_router
-    plane_router -->|"database: world → POST /query"| world_plane
-    plane_router -->|"database: procurement → POST /query"| procurement_plane
-    plane_router -->|"no plane for database"| blocked_query
+    kafka -->|"Consume"| mcp_worker
+    mcp_worker -->|"tools/call + identity headers"| world_mcp
+    mcp_worker -->|"tools/call + identity headers"| procurement_mcp
+    mcp_worker -->|"tools/call + identity headers"| report_mcp
+    world_mcp -->|"guarded SELECT → POST /query"| world_plane
+    procurement_mcp -->|"guarded SELECT → POST /query"| procurement_plane
     world_plane -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| worlddb
     procurement_plane -->|"set app.tenant_id/app.user_id<br/>wrapped SELECT limit 500"| procurementdb
     world_plane -->|"invalid SQL, foreign or<br/>disallowed table"| blocked_query
     procurement_plane -->|"invalid SQL, foreign or<br/>disallowed table"| blocked_query
-    workers -->|"Tool result events"| kafka
+    mcp_worker -->|"Tool result events"| kafka
     kafka -->|"Resume run status"| orchestrator
     frontend -->|"Poll /runs/{run_id}"| gateway
     gateway -->|"Run status"| orchestrator
@@ -172,7 +175,7 @@ flowchart TD
     orchestrator -. "agent-run root + tool spans" .-> langfuse
     world_agent -. "planner generations" .-> langfuse
     procurement_agent -. "planner generations" .-> langfuse
-    workers -. "traces + metrics" .-> collector
+    mcp_worker -. "traces + metrics" .-> collector
     world_plane -. "traces + metrics" .-> collector
     procurement_plane -. "traces + metrics" .-> collector
     collector -->|"traces"| tempo
@@ -186,10 +189,10 @@ flowchart TD
 | Layer | What it decides | Current examples |
 | --- | --- | --- |
 | Keycloak roles | Which persona subjects appear in the JWT | `role:world-analyst`, `role:procurement-analyst`, `role:source-auditor`, `role:data-admin` |
-| Casbin policy | Which subjects can use which agent, tool, or source object | `agent:world-agent` `invoke`; `datasource:world-db` `read`; `tool:sql` `execute` |
+| Casbin policy | Which subjects can use which agent, MCP server, or source object | `agent:world-agent` `invoke`; `datasource:world-db` `read`; `mcp:world-mcp` `execute` |
 | Gateway | Whether the user can invoke the requested agent, and which policy subjects are forwarded | `x-policy-subjects`, `x-allowed-permissions: world-db,procurement-db` |
-| Agent service | Which workflow action and tool the run should use (a decision, no side effects) | `world-agent` can plan SQL, report, or approval; `procurement-agent` can plan SQL or approval |
-| Orchestrator policy check | Whether the agent's decision is executed or denied | World data needs `datasource:world-db`; procurement data needs `datasource:procurement-db`; missing access emits an audit event |
+| Agent service | Which workflow action and MCP tool call the run should use (a decision, no side effects) | `world-agent` can plan lookups, reports, or approval; `procurement-agent` can plan lookups or approval |
+| Orchestrator policy check | Whether the agent's decision is executed or denied | World data needs `datasource:world-db` plus `mcp:world-mcp`; procurement data needs `datasource:procurement-db` plus `mcp:procurement-mcp`; missing access emits an audit event |
 | Agent data plane | The last-mile SQL guard against that agent's own database | `world-db-access` allows read-only SELECTs over world tables only; `procurement-db-access` the same for procurement; each holds only its own credentials |
 
 ## Local Services
@@ -206,6 +209,7 @@ flowchart TD
 | Procurement data plane | `http://localhost:8007` | `procurement-db-access`: guarded SQL over the procurement database only |
 | World MCP | `http://localhost:8010` | `world-mcp`: MCP tools over the world database (`/.well-known/mcp-card`) |
 | Procurement MCP | `http://localhost:8011` | `procurement-mcp`: MCP tools over the procurement database (`/.well-known/mcp-card`) |
+| Report MCP | `http://localhost:8012` | `report-mcp`: report generation as a queued MCP job; no database access |
 | Kafka | `localhost:29092` | Host-visible Kafka listener |
 | Postgres | `localhost:5432` | World DB plus seeded `procurement_db` |
 | OTLP collector | `localhost:4317`, `localhost:4318`, `localhost:9464` | Receives OpenTelemetry traces and metrics; exposes Prometheus scrape output |
@@ -230,8 +234,8 @@ procurement schema without requiring the World DB volume to be deleted.
 
 | Username | Password | Good first test | Roles |
 | --- | --- | --- | --- |
-| `world-analyst` | `world-password` | World DB SQL and report | `role:world-analyst` |
-| `procurement-analyst` | `procurement-password` | Procurement DB SQL | `role:procurement-analyst` |
+| `world-analyst` | `world-password` | World DB lookups and reports | `role:world-analyst` |
+| `procurement-analyst` | `procurement-password` | Procurement DB lookups | `role:procurement-analyst` |
 | `source-auditor` | `auditor-password` | Permission denial | `role:source-auditor` |
 | `data-admin` | `data-admin-password` | Human approval | `role:data-admin` |
 
@@ -244,9 +248,9 @@ The Run Agent panel provides these examples:
 
 | Example | User | Agent | Message | Expected result |
 | --- | --- | --- | --- | --- |
-| World Market Hotspots | `world-analyst` | `world-agent` | `show the largest cities by population with country context` | SQL rows from World DB |
-| Market Entry Report | `world-analyst` | `world-agent` | `generate a world market entry report` | Report tool completes with a sample download URL |
-| Procurement Spend Radar | `procurement-analyst` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | SQL rows from `procurement_db` |
+| World Market Hotspots | `world-analyst` | `world-agent` | `show the largest cities by population with country context` | World DB rows via `world-mcp` `list_top_cities` |
+| Market Entry Report | `world-analyst` | `world-agent` | `generate a world market entry report` | `report-mcp` `generate_report` queues a report with a sample download URL |
+| Procurement Spend Radar | `procurement-analyst` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | `procurement_db` rows via `procurement-mcp` `supplier_spend_summary` |
 | Source Permission Denial | `source-auditor` | `procurement-agent` | `rank suppliers by total purchase spend and risk` | `denied` because Casbin allows the agent but not `datasource:procurement-db` |
 | Human Approval Gate | `data-admin` | `procurement-agent` | `remove blocked supplier records from the procurement source` | `requires_approval` and an approval button |
 
@@ -259,7 +263,7 @@ The gateway and orchestrator enforce separate Casbin-backed checks:
 
 - Agent access: `agent:world-agent` or `agent:procurement-agent` with the `invoke` action.
 - Source permission access: `datasource:world-db` or `datasource:procurement-db` with the `read` action.
-- Tool execution access: `tool:sql` or `tool:report` with the `execute` action.
+- MCP server access: `mcp:world-mcp`, `mcp:procurement-mcp`, or `mcp:report-mcp` with the `execute` action. Every executable decision names the `mcp` tool, so the server object is the tool permission.
 
 The seeded realm contains only coarse persona roles. Fine-grained access is not
 duplicated in Keycloak; it lives in Casbin policy.
@@ -276,8 +280,9 @@ Workflow behavior:
 
 - `world-agent` (own service, port 8004) can plan `sql`, `report`, `brief`, or
   `approval`. A `brief` becomes an async run: the agent drives a multi-step
-  workflow (SQL, then a report) through the orchestrator's tool-broker
-  callback API, with every step policy-checked (see `docs/agent-services.md`).
+  workflow (a city lookup, then a report) through the orchestrator's
+  tool-broker callback API, with every step policy-checked (see
+  `docs/agent-services.md`).
 - `procurement-agent` (own service, port 8005) can plan `sql` or `approval`.
 - Each agent service plans with LiteLLM when `LITELLM_MODEL` and `LITELLM_API_KEY` are set.
 - Deterministic fallback routing is used when LiteLLM is not configured or the model call fails.
@@ -295,7 +300,7 @@ Agents integrate through configuration, not orchestrator code changes:
    `AGENT_SERVICES`; the orchestrator discovers its workflow and capabilities
    from `/.well-known/agent-card`.
 4. Grant access in Casbin: `agent:{agent-id}` `invoke` for users, plus any
-   `datasource:*` / `tool:*` rules the agent's decisions require.
+   `datasource:*` / `mcp:*` rules the agent's decisions require.
 
 The full contract (agent card, run request, decision shape, trace
 propagation) is documented in `docs/agent-services.md`.
@@ -395,8 +400,9 @@ After running an agent, open `http://localhost:3000` for Grafana
 (`admin` / `admin`). Grafana starts with `Tempo`, `Prometheus`, and `Loki`
 datasources already provisioned.
 Search services such as
-`gateway`, `orchestrator`, `world-agent`, `procurement-agent`, `sql-worker`,
-`report-worker`, `world-db-access`, and `procurement-db-access`.
+`gateway`, `orchestrator`, `world-agent`, `procurement-agent`, `mcp-worker`,
+`world-mcp`, `procurement-mcp`, `report-mcp`, `world-db-access`, and
+`procurement-db-access`.
 Tempo is an API-backed trace store in this stack, so the browser UI for Tempo
 traces is Grafana Explore, not `http://localhost:3200/`.
 
@@ -413,7 +419,7 @@ Useful spans include:
 - `agent.plan.world` / `agent.plan.procurement`: the agent service's planning step.
 - `agent.choose_plan_action`: LiteLLM or fallback routing decision inside the agent.
 - `kafka.publish`: `agent.requested`, `tool.requested`, `tool.completed`, or `audit.events` emission.
-- `worker.sql_tool` and `worker.report_tool`: existing tool execution steps.
+- `worker.mcp_tool` and `mcp.tool.{name}`: the MCP worker's routing step and the MCP server's tool execution.
 - `data_access.query`, `data_access.validate_sql`, and `data_access.execute_sql`: the owning data plane's SQL guard and database read.
 - `gateway.run_status_response`: the user-facing poll that returns the final run result.
 
@@ -434,9 +440,9 @@ other's data. This is the least-privilege, credential-isolated version of a
 data-access layer.
 
 In the full agent flow, the gateway first checks `agent:{agent_id}` `invoke`
-through Casbin, the orchestrator checks the run's data-source and tool policy,
-and only then does the SQL worker route `POST /query` to the plane that owns the
-database (via the `DATA_PLANES` registry).
+through Casbin, the orchestrator checks the run's data-source and MCP-server
+policy, and only then does the MCP worker route the call to the named MCP
+server, whose tool delegates `POST /query` to the plane that owns the database.
 
 Each plane's job is the database boundary:
 
@@ -471,16 +477,18 @@ Response shape:
 }
 ```
 
-Compose gives each plane only its own database URL, and the SQL worker learns
-where to route each query from `DATA_PLANES`:
+Compose gives each plane only its own database URL, and each MCP server the
+URL of the one plane it delegates to:
 
 ```bash
 # world-db-access service only
 WORLD_DATABASE_URL=postgresql://world:world123@postgres:5432/world-db
 # procurement-db-access service only
 PROCUREMENT_DATABASE_URL=postgresql://world:world123@postgres:5432/procurement_db
-# sql-worker only (database=base-url routing)
-DATA_PLANES=world=http://world-db-access:8006,procurement=http://procurement-db-access:8007
+# world-mcp only
+WORLD_DATA_PLANE_URL=http://world-db-access:8006
+# procurement-mcp only
+PROCUREMENT_DATA_PLANE_URL=http://procurement-db-access:8007
 ```
 
 | Plane | Source permission | Owns database | Env var | Allowed tables | Max rows |
@@ -490,8 +498,8 @@ DATA_PLANES=world=http://world-db-access:8006,procurement=http://procurement-db-
 
 A request for a database the plane does not own returns `404`. A missing
 database URL returns `503`. Invalid SQL returns `400`, and disallowed tables
-return `403`. If no plane is registered for a database, the SQL worker fails the
-run rather than routing the query elsewhere.
+return `403`. If no MCP server is registered for a decision's server id, the
+MCP worker fails the run rather than guessing.
 
 ## API Smoke Tests
 
@@ -646,8 +654,7 @@ uvicorn apps.data_access.world.main:app --host 0.0.0.0 --port 8006
 uvicorn apps.data_access.procurement.main:app --host 0.0.0.0 --port 8007
 uvicorn apps.mcp.world.main:app --host 0.0.0.0 --port 8010
 uvicorn apps.mcp.procurement.main:app --host 0.0.0.0 --port 8011
-python -m apps.workers.sql_worker
-python -m apps.workers.report_worker
+uvicorn apps.mcp.report.main:app --host 0.0.0.0 --port 8012
 python -m apps.workers.mcp_worker
 ```
 
@@ -658,7 +665,7 @@ Kafka, Keycloak, and Postgres are still required for the full flow.
 Rebuild app containers after code changes:
 
 ```bash
-docker compose up --build -d gateway orchestrator world-agent procurement-agent world-db-access procurement-db-access sql-worker report-worker
+docker compose up --build -d gateway orchestrator world-agent procurement-agent world-db-access procurement-db-access world-mcp procurement-mcp report-mcp mcp-worker
 ```
 
 Restart everything:
@@ -694,7 +701,7 @@ docker compose up --force-recreate procurement-db-init
 Follow useful logs:
 
 ```bash
-docker compose logs -f gateway orchestrator world-agent procurement-agent sql-worker report-worker world-db-access procurement-db-access langfuse-web langfuse-worker postgres procurement-db-init
+docker compose logs -f gateway orchestrator world-agent procurement-agent mcp-worker world-mcp procurement-mcp report-mcp world-db-access procurement-db-access langfuse-web langfuse-worker postgres procurement-db-init
 ```
 
 If you edit `docker/keycloak/ptvn-realm.json` after Keycloak has already imported

@@ -24,30 +24,34 @@ posture.
 
 ```mermaid
 flowchart LR
-    agents["Agent services<br/>(decision: tool=mcp)"] --> orchestrator["Orchestrator<br/>McpRegistry (MCP_SERVICES)<br/>Casbin: tool:mcp + datasource"]
+    agents["Agent services<br/>(decision: tool=mcp)"] --> orchestrator["Orchestrator<br/>McpRegistry (MCP_SERVICES)<br/>Casbin: mcp:{server} + datasource"]
     orchestrator -->|"discover: mcp-card,<br/>initialize, tools/list"| worldmcp["world-mcp :8010"]
     orchestrator -->|"discover"| procmcp["procurement-mcp :8011"]
+    orchestrator -->|"discover"| reportmcp["report-mcp :8012"]
     orchestrator -->|"tool.requested"| kafka["Kafka"]
     kafka --> worker["mcp-worker<br/>routes by input.server"]
     worker -->|"tools/call"| worldmcp
     worker -->|"tools/call"| procmcp
+    worker -->|"tools/call"| reportmcp
     worker -->|"tool.completed"| kafka --> orchestrator
     worldmcp -->|"POST /query"| worldplane["world-db-access :8006<br/>world credentials only"]
     procmcp -->|"POST /query"| procplane["procurement-db-access :8007<br/>procurement credentials only"]
 ```
 
-The two shipped examples are `world-mcp` (:8010, tools `list_top_cities` and
-`country_overview`) and `procurement-mcp` (:8011, tools
-`list_recent_purchase_orders` and `supplier_spend_summary`). Both are built
-from the shared runtime in `apps/mcp/runtime.py`.
+The three shipped examples are `world-mcp` (:8010, tools `list_top_cities`
+and `country_overview`), `procurement-mcp` (:8011, tools
+`list_recent_purchase_orders` and `supplier_spend_summary`), and `report-mcp`
+(:8012, tool `generate_report` — a job-submission tool that reads no
+databases and returns a queued report reference). All are built from the
+shared runtime in `apps/mcp/runtime.py`.
 
 ## MCP registry
 
 The orchestrator reads `MCP_SERVICES` (comma-separated `server-id=base-url`
-pairs — the same shape as `AGENT_SERVICES` and `DATA_PLANES`):
+pairs — the same shape as `AGENT_SERVICES`):
 
 ```bash
-MCP_SERVICES=world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011
+MCP_SERVICES=world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011,report-mcp=http://report-mcp:8012
 ```
 
 At startup — and lazily on first use, so start order does not matter — the
@@ -67,9 +71,8 @@ how to treat them — while transport and protocol failures raise
 
 ## Agent tool decisions through MCP
 
-Agents can route a run's tool step to an MCP server by returning a normal
-`tool` decision whose tool is `mcp` and whose `tool_input` addresses the
-target:
+MCP is the platform's only tool transport: every executable agent decision
+names the `mcp` tool, and its `tool_input` addresses the target:
 
 ```json
 {
@@ -84,19 +87,21 @@ target:
 }
 ```
 
-The flow is identical to the `sql` and `report` tools — MCP is just another
-tool on the same policy-enforced bus:
+The flow:
 
-1. The orchestrator enforces Casbin exactly as for any tool decision:
-   `datasource:<required_permission> read` plus `tool:mcp execute`. A failed
-   check denies the run with the usual audit event.
+1. The orchestrator enforces Casbin on the decision:
+   `datasource:<required_permission> read` plus the named server's
+   `mcp:<server> execute` object. Per-server objects keep tool access
+   separately grantable — e.g. `procurement-analyst` holds
+   `mcp:procurement-mcp` but not `mcp:report-mcp`. A failed check denies the
+   run with the usual audit event.
 2. It publishes `tool.requested` with the MCP target in `input`.
 3. The MCP worker (`apps/workers/mcp_worker.py`, consumer group
    `mcp-tool-service`) resolves `input.server` against its own `McpRegistry`
    (built from the same `MCP_SERVICES` spec) and invokes `tools/call`,
-   forwarding `x-tenant-id` / `x-user-id` so RLS still applies at the data
-   plane. An unregistered server fails the run explicitly — mirroring the SQL
-   worker's unknown-database handling — and never guesses a target.
+   forwarding `x-request-id` / `x-tenant-id` / `x-user-id` so RLS still
+   applies at the data plane. An unregistered server fails the run explicitly
+   and never guesses a target.
 4. The worker publishes `tool.completed`: on success the result is
    `{"server", "tool", "output"}` (with `output` taken from
    `structuredContent`); an `isError` tool result or a transport/protocol
@@ -108,12 +113,13 @@ long-running `async` agents can call MCP tools mid-run through
 extra plumbing.
 
 The shipped agents demonstrate the path end to end: the world agent's
-`country` action calls `world-mcp`'s `country_overview`, and the procurement
-agent's `risk` action calls `procurement-mcp`'s `supplier_spend_summary`.
+lookups call `world-mcp` (`list_top_cities`, `country_overview`) and its
+reports call `report-mcp` (`generate_report`); the procurement agent's
+lookups and risk reviews call `procurement-mcp` (`supplier_spend_summary`).
 
 ## MCP service contract
 
-Any MCP server must implement three endpoints. The two shipped examples get
+Any MCP server must implement three endpoints. The shipped examples get
 them from `create_mcp_app()` in `apps/mcp/runtime.py`; a non-Python server
 implements the same shapes.
 
@@ -163,7 +169,9 @@ protocol errors: they come back as `isError: true` results with the detail in
 Tenant and user identity arrive as trusted `x-tenant-id` / `x-user-id`
 headers (the same header-trust model as the data planes) and are forwarded to
 the data plane, which sets them in the Postgres session for RLS. Tools that
-read data refuse to run without them.
+read data refuse to run without them. The `x-request-id` header is also
+passed into the tool context so job-style tools (like `generate_report`) can
+mint request-scoped identifiers.
 
 ### `GET /health`
 
@@ -185,8 +193,9 @@ McpTool(
 ```
 
 Handlers receive validated-by-you `arguments` and an `McpToolContext`
-(`tenant_id`, `user_id`, shared `http` client). Raise `McpToolError` for
-anything the caller should see as a tool error. `query_data_plane()` wraps
+(`tenant_id`, `user_id`, `request_id`, shared `http` client). Raise
+`McpToolError` for anything the caller should see as a tool error.
+`query_data_plane()` wraps
 the data-plane call: it forwards identity headers, normalizes plane failures
 into `McpToolError`, and returns the rows. Because tool inputs become SQL
 literals, example tools validate every input against a closed vocabulary
@@ -204,8 +213,9 @@ plane's parser remains the final guard.
 4. If its tools read a database, point it at the data plane that owns that
    database (never at the database itself) and advertise the matching
    permission via `required_permission` so Casbin policy can be aligned.
-5. Grant `tool:mcp execute` (plus the needed `datasource:* read`) to the
-   roles whose agents should reach it.
+5. Grant `mcp:<server-id> execute` (plus the needed `datasource:* read`) to
+   the roles whose agents should reach it — each server is its own Casbin
+   object, so access is grantable per server.
 6. Verify discovery with `GET /internal/mcp` on the orchestrator; agents can
    then target it with `tool="mcp"` decisions.
 

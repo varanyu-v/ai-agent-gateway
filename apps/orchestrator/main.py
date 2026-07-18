@@ -31,7 +31,7 @@ from pydantic import BaseModel
 from typing_extensions import TypedDict
 
 from apps.authz import (
-    can_execute_tool,
+    can_execute_mcp_server,
     can_invoke_agent_subjects,
     can_read_data_source_subjects,
     parse_policy_subjects as parse_casbin_subjects,
@@ -83,6 +83,10 @@ MCP_READ_TIMEOUT_SECONDS = float(os.getenv("MCP_READ_TIMEOUT_SECONDS", "30"))
 # Shared secret agents must present on tool-broker callbacks. Empty disables
 # the check (network trust only), matching the header-trust model elsewhere.
 AGENT_CALLBACK_TOKEN = os.getenv("AGENT_CALLBACK_TOKEN", "")
+
+# MCP is the only tool transport: every executable decision names tool="mcp"
+# and addresses a registered MCP server, which carries its own Casbin object.
+MCP_TOOL = "mcp"
 
 
 class AgentState(TypedDict):
@@ -162,17 +166,17 @@ def completed_tool_output(
     tool: str | None,
     result: dict[str, Any] | None,
 ) -> str | None:
-    if tool == "sql":
-        rows = result.get("rows", []) if result else []
-        return f"SQL tool completed with {len(rows)} row(s)."
-    if tool == "report":
-        report_id = result.get("report_id") if result else None
-        return f"Report tool completed: {report_id}."
-    if tool == "mcp":
+    if tool == MCP_TOOL:
         name = result.get("tool") if result else None
         output = (result or {}).get("output") or {}
         row_count = output.get("row_count")
-        suffix = f" with {row_count} row(s)" if isinstance(row_count, int) else ""
+        report_id = output.get("report_id")
+        if isinstance(row_count, int):
+            suffix = f" with {row_count} row(s)"
+        elif report_id:
+            suffix = f": report {report_id}"
+        else:
+            suffix = ""
         return f"MCP tool '{name}' completed{suffix}."
     return None
 
@@ -573,11 +577,11 @@ def can_use_permission(state: AgentState, permission: str) -> bool:
     )
 
 
-def can_use_tool(state: AgentState, tool: str) -> bool:
-    return can_execute_tool(
+def can_use_mcp_server(state: AgentState, server_id: str) -> bool:
+    return can_execute_mcp_server(
         state["policy_subjects"],
         state["tenant_id"],
-        tool,
+        server_id,
     )
 
 
@@ -760,11 +764,19 @@ async def apply_agent_decision(
 
     if action == "tool":
         tool = str(decision.get("tool") or "")
+        tool_input = decision.get("tool_input") or {}
         permission = decision.get("required_permission")
         if permission and not can_use_permission(state, str(permission)):
             return await deny_permission_access(state, workflow, str(permission))
-        if not tool or not can_use_tool(state, tool):
+        if tool != MCP_TOOL:
             return await deny_tool_access(state, workflow, tool or "unknown")
+        server_id = str(tool_input.get("server") or "")
+        if not server_id or not can_use_mcp_server(state, server_id):
+            return await deny_tool_access(
+                state,
+                workflow,
+                f"mcp:{server_id or 'unknown'}",
+            )
 
         tool_call_id = f"{state['request_id']}:{tool}:1"
         await publish(
@@ -774,7 +786,7 @@ async def apply_agent_decision(
                 "tool": tool,
                 "tool_call_id": tool_call_id,
                 "workflow": workflow,
-                "input": decision.get("tool_input") or {},
+                "input": tool_input,
             },
         )
         return {"needs_approval": False, "denied_reason": None}
@@ -1226,6 +1238,7 @@ async def request_tool_call(
         state = callback_state_from_run(run_record)
         workflow = str(run_record.get("workflow") or "")
         tool = body.tool.strip()
+        tool_input = body.tool_input or {}
 
         if body.required_permission and not can_use_permission(
             state,
@@ -1238,8 +1251,17 @@ async def request_tool_call(
             )
             span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
             raise HTTPException(status_code=403, detail=denial["denied_reason"])
-        if not tool or not can_use_tool(state, tool):
+        if tool != MCP_TOOL:
             denial = await deny_tool_access(state, workflow, tool or "unknown")
+            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            raise HTTPException(status_code=403, detail=denial["denied_reason"])
+        server_id = str(tool_input.get("server") or "")
+        if not server_id or not can_use_mcp_server(state, server_id):
+            denial = await deny_tool_access(
+                state,
+                workflow,
+                f"mcp:{server_id or 'unknown'}",
+            )
             span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
             raise HTTPException(status_code=403, detail=denial["denied_reason"])
 
@@ -1253,7 +1275,7 @@ async def request_tool_call(
                 "tool_call_id": tool_call_id,
                 "tool": tool,
                 "status": "requested",
-                "input": body.tool_input or {},
+                "input": tool_input,
                 "result": None,
                 "denied_reason": None,
                 "output": None,
@@ -1266,7 +1288,7 @@ async def request_tool_call(
                 "tool": tool,
                 "tool_call_id": tool_call_id,
                 "workflow": workflow,
-                "input": body.tool_input or {},
+                "input": tool_input,
             },
         )
         span.set_attribute("app.tool_call_id", tool_call_id)

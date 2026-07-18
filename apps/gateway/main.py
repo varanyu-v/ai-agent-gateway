@@ -16,11 +16,11 @@ from apps.authz import (
     agent_access_rules,
     allowed_agents,
     allowed_data_sources,
-    allowed_tools,
+    allowed_mcp_servers,
     can_invoke_agent,
     data_source_access_rules,
+    mcp_server_access_rules,
     policy_subjects,
-    tool_access_rules,
 )
 from apps.gateway.auth import current_user
 from apps.gateway.config import settings
@@ -184,7 +184,7 @@ async def ui_config() -> dict[str, Any]:
         "policyMode": "casbin",
         "agents": agent_access_rules(),
         "tools": data_source_access_rules(),
-        "toolPolicies": tool_access_rules(),
+        "toolPolicies": mcp_server_access_rules(),
         "monitorTools": [
             {"id": "grafana", "label": "Grafana", "url": settings.grafana_url},
             {"id": "prometheus", "label": "Prometheus", "url": settings.prometheus_url},
@@ -207,7 +207,7 @@ async def ui_permissions(
         "allowedAgents": allowed_agents(user),
         "allowedDataSources": data_sources,
         "allowedPermissions": data_sources,
-        "allowedTools": allowed_tools(user),
+        "allowedTools": allowed_mcp_servers(user),
     }
 
 

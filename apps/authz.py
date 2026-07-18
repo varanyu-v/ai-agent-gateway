@@ -14,7 +14,7 @@ DEFAULT_POLICY_PATH = REPO_ROOT / "policy" / "casbin_policy.csv"
 
 AGENT_PREFIX = "agent:"
 DATA_SOURCE_PREFIX = "datasource:"
-TOOL_PREFIX = "tool:"
+MCP_SERVER_PREFIX = "mcp:"
 INVOKE = "invoke"
 READ = "read"
 EXECUTE = "execute"
@@ -128,8 +128,17 @@ def can_read_data_source(user: dict[str, Any], source_id: str) -> bool:
     return is_allowed_user(user, f"{DATA_SOURCE_PREFIX}{source_id}", READ)
 
 
-def can_execute_tool(subjects: Iterable[str], tenant_id: str, tool_id: str) -> bool:
-    return is_allowed_subjects(subjects, tenant_id, f"{TOOL_PREFIX}{tool_id}", EXECUTE)
+def can_execute_mcp_server(
+    subjects: Iterable[str],
+    tenant_id: str,
+    server_id: str,
+) -> bool:
+    return is_allowed_subjects(
+        subjects,
+        tenant_id,
+        f"{MCP_SERVER_PREFIX}{server_id}",
+        EXECUTE,
+    )
 
 
 def can_read_data_source_subjects(
@@ -164,12 +173,12 @@ def allowed_data_sources(user: dict[str, Any]) -> list[str]:
     )
 
 
-def allowed_tools(user: dict[str, Any]) -> list[str]:
+def allowed_mcp_servers(user: dict[str, Any]) -> list[str]:
     subjects = policy_subjects(user)
     return sorted(
-        tool_id
-        for tool_id in configured_tools()
-        if can_execute_tool(subjects, user["tenant_id"], tool_id)
+        server_id
+        for server_id in configured_mcp_servers()
+        if can_execute_mcp_server(subjects, user["tenant_id"], server_id)
     )
 
 
@@ -181,8 +190,8 @@ def configured_data_sources() -> tuple[str, ...]:
     return _configured_ids(DATA_SOURCE_PREFIX, READ)
 
 
-def configured_tools() -> tuple[str, ...]:
-    return _configured_ids(TOOL_PREFIX, EXECUTE)
+def configured_mcp_servers() -> tuple[str, ...]:
+    return _configured_ids(MCP_SERVER_PREFIX, EXECUTE)
 
 
 def _configured_ids(prefix: str, action: str) -> tuple[str, ...]:
@@ -202,8 +211,8 @@ def data_source_access_rules() -> list[dict[str, Any]]:
     return _access_rules(DATA_SOURCE_PREFIX, READ)
 
 
-def tool_access_rules() -> list[dict[str, Any]]:
-    return _access_rules(TOOL_PREFIX, EXECUTE)
+def mcp_server_access_rules() -> list[dict[str, Any]]:
+    return _access_rules(MCP_SERVER_PREFIX, EXECUTE)
 
 
 def _access_rules(prefix: str, action: str) -> list[dict[str, Any]]:

@@ -1,17 +1,17 @@
-"""MCP tool worker.
+"""MCP tool worker — the platform's only tool worker.
 
-Consumes `tool.requested` events whose tool is "mcp" and routes each call to
-the MCP server named in the event, using the same `MCP_SERVICES` registry
+Consumes `tool.requested` events (tool is always "mcp") and routes each call
+to the MCP server named in the event, using the same `MCP_SERVICES` registry
 spec the orchestrator reads. The event's `input` addresses the target:
 
     {"server": "world-mcp", "name": "list_top_cities", "arguments": {...}}
 
 The orchestrator has already enforced Casbin before publishing the event
-(`tool:mcp` execute plus the decision's required datasource permission), so
-this worker only routes. It owns no credentials: MCP servers delegate reads
-to their data planes, and the caller's tenant/user identity is forwarded so
-RLS still applies. Results are published to `tool.completed` like every other
-tool worker.
+(the server's `mcp:{server}` execute object plus the decision's required
+datasource permission), so this worker only routes. It owns no credentials:
+MCP servers delegate reads to their data planes, and the caller's
+request/tenant/user identity is forwarded so RLS still applies. Results are
+published to `tool.completed`.
 """
 
 import asyncio
