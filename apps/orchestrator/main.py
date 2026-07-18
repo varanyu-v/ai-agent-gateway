@@ -53,6 +53,10 @@ from apps.observability import (
     setup_observability,
     start_event_span,
 )
+from apps.orchestrator.mcp_registry import (
+    DEFAULT_MCP_SERVICES,
+    McpRegistry,
+)
 from apps.orchestrator.registry import (
     DEFAULT_AGENT_SERVICES,
     AgentRegistry,
@@ -73,6 +77,9 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 AGENT_SERVICES = os.getenv("AGENT_SERVICES", DEFAULT_AGENT_SERVICES)
 AGENT_CONNECT_TIMEOUT_SECONDS = float(os.getenv("AGENT_CONNECT_TIMEOUT_SECONDS", "5"))
 AGENT_READ_TIMEOUT_SECONDS = float(os.getenv("AGENT_READ_TIMEOUT_SECONDS", "60"))
+MCP_SERVICES = os.getenv("MCP_SERVICES", DEFAULT_MCP_SERVICES)
+MCP_CONNECT_TIMEOUT_SECONDS = float(os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "5"))
+MCP_READ_TIMEOUT_SECONDS = float(os.getenv("MCP_READ_TIMEOUT_SECONDS", "30"))
 # Shared secret agents must present on tool-broker callbacks. Empty disables
 # the check (network trust only), matching the header-trust model elsewhere.
 AGENT_CALLBACK_TOKEN = os.getenv("AGENT_CALLBACK_TOKEN", "")
@@ -133,6 +140,11 @@ agent_registry = AgentRegistry(
     AGENT_SERVICES,
     connect_timeout_seconds=AGENT_CONNECT_TIMEOUT_SECONDS,
     read_timeout_seconds=AGENT_READ_TIMEOUT_SECONDS,
+)
+mcp_registry = McpRegistry(
+    MCP_SERVICES,
+    connect_timeout_seconds=MCP_CONNECT_TIMEOUT_SECONDS,
+    read_timeout_seconds=MCP_READ_TIMEOUT_SECONDS,
 )
 tracer = setup_observability("orchestrator")
 langfuse_tracer = setup_langfuse_observability("orchestrator")
@@ -761,6 +773,7 @@ async def lifespan(app: FastAPI):
     global completed_consumer, completed_consumer_task, producer
 
     await agent_registry.start()
+    await mcp_registry.start()
     producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP)
     completed_consumer = AIOKafkaConsumer(
         "tool.completed",
@@ -781,6 +794,7 @@ async def lifespan(app: FastAPI):
             await completed_consumer.stop()
         await producer.stop()
         await agent_registry.aclose()
+        await mcp_registry.aclose()
         close_pending_langfuse_traces()
         completed_consumer_task = None
         completed_consumer = None
@@ -1068,6 +1082,24 @@ async def list_agents() -> dict[str, Any]:
             }
             for agent_id in agent_registry.agent_ids
             if (agent := agent_registry.get(agent_id)) is not None
+        ],
+    }
+
+
+@app.get("/internal/mcp", include_in_schema=False)
+async def list_mcp_servers() -> dict[str, Any]:
+    return {
+        "servers": [
+            {
+                "server_id": server.server_id,
+                "name": server.name,
+                "base_url": server.base_url,
+                "protocol_version": server.protocol_version,
+                "tools": server.tools,
+                "card": server.card,
+            }
+            for server_id in mcp_registry.server_ids
+            if (server := mcp_registry.get(server_id)) is not None
         ],
     }
 

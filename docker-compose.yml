@@ -382,6 +382,9 @@ services:
       AGENT_SERVICES: ${AGENT_SERVICES:-world-agent=http://world-agent:8004,procurement-agent=http://procurement-agent:8005}
       AGENT_CONNECT_TIMEOUT_SECONDS: ${AGENT_CONNECT_TIMEOUT_SECONDS:-5}
       AGENT_READ_TIMEOUT_SECONDS: ${AGENT_READ_TIMEOUT_SECONDS:-60}
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011}
+      MCP_CONNECT_TIMEOUT_SECONDS: ${MCP_CONNECT_TIMEOUT_SECONDS:-5}
+      MCP_READ_TIMEOUT_SECONDS: ${MCP_READ_TIMEOUT_SECONDS:-30}
       ROUTER_AGENT_ID: ${ROUTER_AGENT_ID:-assistant}
     ports:
       - "8001:8001"
@@ -488,6 +491,52 @@ services:
       test:
         - CMD-SHELL
         - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8007/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # MCP tool services. Credential-free like the agents: every read goes
+  # through the data plane that owns the database.
+  world-mcp:
+    <<: *app
+    command: uvicorn apps.mcp.world.main:app --host 0.0.0.0 --port 8010
+    environment:
+      <<: *app-env
+      WORLD_DATA_PLANE_URL: http://world-db-access:8006
+    ports:
+      - "8010:8010"
+    depends_on:
+      world-db-access:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procurement-mcp:
+    <<: *app
+    command: uvicorn apps.mcp.procurement.main:app --host 0.0.0.0 --port 8011
+    environment:
+      <<: *app-env
+      PROCUREMENT_DATA_PLANE_URL: http://procurement-db-access:8007
+    ports:
+      - "8011:8011"
+    depends_on:
+      procurement-db-access:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5

@@ -61,6 +61,7 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent sql-wo
 - `apps/authz.py` and `policy/casbin_*`: shared Casbin model and policy used by the gateway and orchestrator.
 - `apps/workers`: consumes `tool.requested` events and publishes `tool.completed` events. The SQL worker routes each query to the data plane that owns its database, using the `DATA_PLANES` registry.
 - `apps/data_access`: per-agent database access layers built on a shared runtime (`apps/data_access/runtime.py`). Each plane holds credentials for only its own database and enforces the final read-only, table-allowlisted, tenant-scoped SQL guard. `apps/data_access/world` (`world-db-access`) and `apps/data_access/procurement` (`procurement-db-access`) are the two current planes.
+- `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world` and `apps/mcp/procurement` are the two example servers. See `docs/mcp-services.md`.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
 - `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, SQL response rendering, agent input/output, and human approval.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
@@ -203,6 +204,8 @@ flowchart TD
 | Procurement agent | `http://localhost:8005` | Standalone procurement-agent service (`/.well-known/agent-card`) |
 | World data plane | `http://localhost:8006` | `world-db-access`: guarded SQL over the world database only |
 | Procurement data plane | `http://localhost:8007` | `procurement-db-access`: guarded SQL over the procurement database only |
+| World MCP | `http://localhost:8010` | `world-mcp`: MCP tools over the world database (`/.well-known/mcp-card`) |
+| Procurement MCP | `http://localhost:8011` | `procurement-mcp`: MCP tools over the procurement database (`/.well-known/mcp-card`) |
 | Kafka | `localhost:29092` | Host-visible Kafka listener |
 | Postgres | `localhost:5432` | World DB plus seeded `procurement_db` |
 | OTLP collector | `localhost:4317`, `localhost:4318`, `localhost:9464` | Receives OpenTelemetry traces and metrics; exposes Prometheus scrape output |
@@ -641,6 +644,8 @@ uvicorn apps.agents.world.main:app --host 0.0.0.0 --port 8004
 uvicorn apps.agents.procurement.main:app --host 0.0.0.0 --port 8005
 uvicorn apps.data_access.world.main:app --host 0.0.0.0 --port 8006
 uvicorn apps.data_access.procurement.main:app --host 0.0.0.0 --port 8007
+uvicorn apps.mcp.world.main:app --host 0.0.0.0 --port 8010
+uvicorn apps.mcp.procurement.main:app --host 0.0.0.0 --port 8011
 python -m apps.workers.sql_worker
 python -m apps.workers.report_worker
 ```
