@@ -67,8 +67,10 @@ from apps.orchestrator.router import (
     GENERAL_ROUTE,
     ROUTER_AGENT_ID,
     ROUTER_WORKFLOW,
+    RouteDecision,
     answer_general,
     classify_route,
+    fallback_route,
     is_router_agent,
 )
 
@@ -934,16 +936,43 @@ async def run(
                 # Supervisor path: classify the message, then either answer it
                 # directly (general topics) or hand it to the matching
                 # registered agent through the normal policy-enforced flow.
-                candidates = [
+                # Only agents this caller may invoke reach the planner, so no
+                # description of an unreachable agent enters the prompt.
+                registered = [
                     candidate
                     for candidate_id in agent_registry.agent_ids
                     if (candidate := agent_registry.get(candidate_id)) is not None
+                ]
+                candidates = [
+                    candidate
+                    for candidate in registered
+                    if can_invoke_agent_subjects(
+                        state["policy_subjects"],
+                        x_tenant_id,
+                        candidate.agent_id,
+                    )
+                ]
+                reachable_ids = {candidate.agent_id for candidate in candidates}
+                unreachable = [
+                    candidate
+                    for candidate in registered
+                    if candidate.agent_id not in reachable_ids
                 ]
                 route = await classify_route(
                     body.message,
                     candidates,
                     span_child_context(langfuse_span),
                 )
+
+                if route.target == GENERAL_ROUTE and unreachable:
+                    # Withholding unreachable agents from the planner would
+                    # also turn a probe for forbidden data into an ordinary
+                    # general answer, losing the explicit denial and its audit
+                    # record. Match those agents deterministically instead, so
+                    # the refusal stays visible to the user and to audit.
+                    blocked = fallback_route(body.message, unreachable)
+                    if blocked != GENERAL_ROUTE:
+                        route = RouteDecision(target=blocked, source="policy_filter")
                 route_attributes = clean_attributes(
                     {
                         "app.route.target": route.target,
@@ -967,6 +996,7 @@ async def run(
                     answer = await answer_general(
                         body.message,
                         span_child_context(langfuse_span),
+                        candidates,
                     )
                     await publish(
                         "audit.events",

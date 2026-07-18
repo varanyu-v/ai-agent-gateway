@@ -171,82 +171,123 @@ class AuthzPolicyTests(unittest.TestCase):
             ["user:alice", "role:world-analyst"],
         )
 
-    def test_ui_policy_metadata_comes_from_casbin_policy(self) -> None:
+    def test_access_catalog_lists_denied_objects_without_their_roles(self) -> None:
+        current_user = user("world-analyst", ["role:world-analyst"])
+
+        catalog = authz.access_catalog(authz.AGENT_PREFIX, authz.INVOKE, current_user)
+        entries = {entry["id"]: entry for entry in catalog}
+
         self.assertEqual(
-            authz.agent_access_rules(),
-            [
-                {
-                    "id": "assistant",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:procurement-analyst",
-                        "role:source-auditor",
-                        "role:world-analyst",
-                    ],
-                    "policyObject": "agent:assistant",
-                    "policyAction": "invoke",
-                },
-                {
-                    "id": "procurement-agent",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:procurement-analyst",
-                        "role:source-auditor",
-                    ],
-                    "policyObject": "agent:procurement-agent",
-                    "policyAction": "invoke",
-                },
-                {
-                    "id": "world-agent",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:source-auditor",
-                        "role:world-analyst",
-                    ],
-                    "policyObject": "agent:world-agent",
-                    "policyAction": "invoke",
-                },
-            ],
+            sorted(entries),
+            ["assistant", "procurement-agent", "world-agent"],
+        )
+        self.assertTrue(entries["world-agent"]["allowed"])
+        self.assertFalse(entries["procurement-agent"]["allowed"])
+        self.assertEqual(entries["world-agent"]["policyObject"], "agent:world-agent")
+        for entry in catalog:
+            self.assertNotIn("roles", entry)
+
+    def test_access_catalog_includes_roles_for_admins_only(self) -> None:
+        admin = user("data-admin", ["role:data-admin"])
+        analyst = user("world-analyst", ["role:world-analyst"])
+
+        self.assertTrue(authz.is_policy_admin(admin))
+        self.assertFalse(authz.is_policy_admin(analyst))
+
+        catalog = authz.access_catalog(
+            authz.AGENT_PREFIX,
+            authz.INVOKE,
+            admin,
+            include_roles=True,
+        )
+        entries = {entry["id"]: entry for entry in catalog}
+        self.assertEqual(
+            entries["world-agent"]["roles"],
+            ["role:data-admin", "role:source-auditor", "role:world-analyst"],
+        )
+
+    def test_access_catalog_surfaces_ungoverned_registry_entries(self) -> None:
+        current_user = user("data-admin", ["role:data-admin"])
+
+        catalog = authz.access_catalog(
+            authz.AGENT_PREFIX,
+            authz.INVOKE,
+            current_user,
+            known_ids=["shadow-agent"],
+        )
+        entries = {entry["id"]: entry for entry in catalog}
+
+        self.assertIn("shadow-agent", entries)
+        self.assertFalse(entries["shadow-agent"]["governed"])
+        # Deny-by-default: even an admin has no grant for an unlisted object.
+        self.assertFalse(entries["shadow-agent"]["allowed"])
+        self.assertTrue(entries["world-agent"]["governed"])
+
+    def test_admin_policy_metadata_comes_from_casbin_policy(self) -> None:
+        admin = user("data-admin", ["role:data-admin"])
+
+        agents = {
+            entry["id"]: entry
+            for entry in authz.access_catalog(
+                authz.AGENT_PREFIX,
+                authz.INVOKE,
+                admin,
+                include_roles=True,
+            )
+        }
+        self.assertEqual(
+            {agent_id: agents[agent_id]["roles"] for agent_id in agents},
+            {
+                "assistant": [
+                    "role:data-admin",
+                    "role:procurement-analyst",
+                    "role:source-auditor",
+                    "role:world-analyst",
+                ],
+                "procurement-agent": [
+                    "role:data-admin",
+                    "role:procurement-analyst",
+                    "role:source-auditor",
+                ],
+                "world-agent": [
+                    "role:data-admin",
+                    "role:source-auditor",
+                    "role:world-analyst",
+                ],
+            },
+        )
+
+        servers = {
+            entry["id"]: entry
+            for entry in authz.access_catalog(
+                authz.MCP_SERVER_PREFIX,
+                authz.EXECUTE,
+                admin,
+                include_roles=True,
+            )
+        }
+        self.assertEqual(
+            {server_id: servers[server_id]["roles"] for server_id in servers},
+            {
+                "procurement-mcp": [
+                    "role:data-admin",
+                    "role:procurement-analyst",
+                ],
+                "report-mcp": [
+                    "role:data-admin",
+                    "role:source-auditor",
+                    "role:world-analyst",
+                ],
+                "world-mcp": [
+                    "role:data-admin",
+                    "role:source-auditor",
+                    "role:world-analyst",
+                ],
+            },
         )
         self.assertEqual(
-            authz.mcp_server_access_rules(),
-            [
-                {
-                    "id": "procurement-mcp",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:procurement-analyst",
-                    ],
-                    "policyObject": "mcp:procurement-mcp",
-                    "policyAction": "execute",
-                },
-                {
-                    "id": "report-mcp",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:source-auditor",
-                        "role:world-analyst",
-                    ],
-                    "policyObject": "mcp:report-mcp",
-                    "policyAction": "execute",
-                },
-                {
-                    "id": "world-mcp",
-                    "role": "role:data-admin",
-                    "roles": [
-                        "role:data-admin",
-                        "role:source-auditor",
-                        "role:world-analyst",
-                    ],
-                    "policyObject": "mcp:world-mcp",
-                    "policyAction": "execute",
-                },
-            ],
+            servers["world-mcp"]["policyObject"],
+            "mcp:world-mcp",
         )
 
 

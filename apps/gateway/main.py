@@ -13,13 +13,18 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from pydantic import BaseModel
 
 from apps.authz import (
-    agent_access_rules,
+    AGENT_PREFIX,
+    DATA_SOURCE_PREFIX,
+    EXECUTE,
+    INVOKE,
+    MCP_SERVER_PREFIX,
+    READ,
+    access_catalog,
     allowed_agents,
     allowed_data_sources,
     allowed_mcp_servers,
     can_invoke_agent,
-    data_source_access_rules,
-    mcp_server_access_rules,
+    is_policy_admin,
     policy_subjects,
 )
 from apps.gateway.auth import current_user
@@ -193,9 +198,9 @@ async def ui_config() -> dict[str, Any]:
             "welcomeMessage": PERSONA.welcome,
         },
         "policyMode": "casbin",
-        "agents": agent_access_rules(),
-        "tools": data_source_access_rules(),
-        "toolPolicies": mcp_server_access_rules(),
+        # The agent/tool catalog and the subjects that gate it are served from
+        # the authenticated /catalog endpoint; this route is unauthenticated
+        # bootstrap config only.
         "monitorTools": [
             {"id": "grafana", "label": "Grafana", "url": settings.grafana_url},
             {"id": "prometheus", "label": "Prometheus", "url": settings.prometheus_url},
@@ -219,6 +224,96 @@ async def ui_permissions(
         "allowedDataSources": data_sources,
         "allowedPermissions": data_sources,
         "allowedTools": allowed_mcp_servers(user),
+    }
+
+
+async def registry_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Fetch what is actually registered, or report the registry unreachable."""
+    try:
+        agents_response = await orchestrator.request("GET", "/internal/agents")
+        mcp_response = await orchestrator.request("GET", "/internal/mcp")
+    except UpstreamError:
+        return [], [], False
+
+    if agents_response.status_code >= 400 or mcp_response.status_code >= 400:
+        return [], [], False
+
+    try:
+        agents = agents_response.json().get("agents") or []
+        servers = mcp_response.json().get("servers") or []
+    except ValueError:
+        return [], [], False
+
+    return (
+        [agent for agent in agents if isinstance(agent, dict)],
+        [server for server in servers if isinstance(server, dict)],
+        True,
+    )
+
+
+@app.get("/catalog")
+async def catalog(user: dict[str, Any] = Depends(current_user)) -> dict[str, Any]:
+    """Every agent, MCP server, and data source, flagged with the caller's access."""
+    registered_agents, registered_servers, registry_available = await registry_snapshot()
+    include_roles = is_policy_admin(user)
+
+    agent_names = {
+        str(agent.get("agent_id")): str(agent.get("name") or agent.get("agent_id"))
+        for agent in registered_agents
+        if agent.get("agent_id")
+    }
+    server_tools = {
+        str(server.get("server_id")): [
+            tool for tool in (server.get("tools") or []) if isinstance(tool, dict)
+        ]
+        for server in registered_servers
+        if server.get("server_id")
+    }
+
+    agents = access_catalog(
+        AGENT_PREFIX,
+        INVOKE,
+        user,
+        known_ids=agent_names,
+        include_roles=include_roles,
+    )
+    for entry in agents:
+        entry["name"] = agent_names.get(entry["id"], entry["id"])
+        entry["registered"] = entry["id"] in agent_names
+
+    mcp_servers = access_catalog(
+        MCP_SERVER_PREFIX,
+        EXECUTE,
+        user,
+        known_ids=server_tools,
+        include_roles=include_roles,
+    )
+    for entry in mcp_servers:
+        entry["registered"] = entry["id"] in server_tools
+        # Tool-level detail is only meaningful to a caller who can execute the
+        # server, and authz has no per-tool granularity to enforce below this.
+        entry["tools"] = (
+            [
+                {
+                    "name": str(tool.get("name", "")),
+                    "description": str(tool.get("description", "")),
+                }
+                for tool in server_tools.get(entry["id"], [])
+            ]
+            if entry["allowed"]
+            else []
+        )
+
+    return {
+        "registryAvailable": registry_available,
+        "agents": agents,
+        "mcpServers": mcp_servers,
+        "dataSources": access_catalog(
+            DATA_SOURCE_PREFIX,
+            READ,
+            user,
+            include_roles=include_roles,
+        ),
     }
 
 

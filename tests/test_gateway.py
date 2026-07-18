@@ -175,6 +175,34 @@ def orchestrator_stub(request: httpx.Request) -> httpx.Response:
         )
     if path == "/internal/health":
         return httpx.Response(200, json={"status": "ok"})
+    if path == "/internal/agents":
+        return httpx.Response(
+            200,
+            json={
+                "agents": [
+                    {"agent_id": "world-agent", "name": "World Agent"},
+                    {"agent_id": "procurement-agent", "name": "Procurement Agent"},
+                    # Running but absent from the policy file.
+                    {"agent_id": "shadow-agent", "name": "Shadow Agent"},
+                ],
+            },
+        )
+    if path == "/internal/mcp":
+        return httpx.Response(
+            200,
+            json={
+                "servers": [
+                    {
+                        "server_id": "world-mcp",
+                        "tools": [{"name": "query_world", "description": "World SQL"}],
+                    },
+                    {
+                        "server_id": "procurement-mcp",
+                        "tools": [{"name": "query_spend", "description": "Spend SQL"}],
+                    },
+                ],
+            },
+        )
     return httpx.Response(500, json={"detail": "unexpected path"})
 
 
@@ -203,6 +231,60 @@ class GatewayApiTests(unittest.IsolatedAsyncioTestCase):
         await self.client.aclose()
         await gateway_main.orchestrator.aclose()
         gateway_main.app.dependency_overrides.clear()
+
+    async def test_ui_config_does_not_expose_the_policy_catalog(self) -> None:
+        response = await self.client.get("/ui/config")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        for leaked_key in ("agents", "tools", "toolPolicies"):
+            self.assertNotIn(leaked_key, body)
+
+    async def test_catalog_flags_access_without_naming_granting_roles(self) -> None:
+        response = await self.client.get("/catalog")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["registryAvailable"])
+
+        agents = {agent["id"]: agent for agent in body["agents"]}
+        self.assertTrue(agents["world-agent"]["allowed"])
+        self.assertFalse(agents["procurement-agent"]["allowed"])
+        self.assertEqual(agents["world-agent"]["name"], "World Agent")
+        # A non-admin never learns which subject would grant the denied entry.
+        self.assertNotIn("roles", agents["procurement-agent"])
+
+    async def test_catalog_reports_registry_and_policy_drift(self) -> None:
+        response = await self.client.get("/catalog")
+        agents = {agent["id"]: agent for agent in response.json()["agents"]}
+
+        # Running, but no policy row: listed, ungoverned, and denied by default.
+        self.assertTrue(agents["shadow-agent"]["registered"])
+        self.assertFalse(agents["shadow-agent"]["governed"])
+        self.assertFalse(agents["shadow-agent"]["allowed"])
+
+        # In policy, but not registered with the orchestrator.
+        self.assertTrue(agents["assistant"]["governed"])
+        self.assertFalse(agents["assistant"]["registered"])
+
+    async def test_catalog_withholds_tool_detail_for_denied_servers(self) -> None:
+        response = await self.client.get("/catalog")
+        servers = {server["id"]: server for server in response.json()["mcpServers"]}
+
+        self.assertTrue(servers["world-mcp"]["allowed"])
+        self.assertEqual(
+            [tool["name"] for tool in servers["world-mcp"]["tools"]],
+            ["query_world"],
+        )
+        self.assertFalse(servers["procurement-mcp"]["allowed"])
+        self.assertEqual(servers["procurement-mcp"]["tools"], [])
+
+    async def test_catalog_requires_authentication(self) -> None:
+        gateway_main.app.dependency_overrides.clear()
+
+        response = await self.client.get("/catalog")
+
+        self.assertEqual(response.status_code, 401)
 
     async def test_healthz_reports_ok(self) -> None:
         response = await self.client.get("/healthz")

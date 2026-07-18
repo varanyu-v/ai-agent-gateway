@@ -78,21 +78,67 @@ Rules:
 # branding can never widen or misstate what this mode may claim to access.
 GENERAL_ANSWER_RULES = """
 Answer the user's question directly, concisely, and helpfully. You have no
-access to company databases or tools in this mode; if the question needs
-procurement or world data, say that the matching specialist agent will handle
-it when asked directly.
+access to company databases or tools in this mode. When the question needs
+data a specialist agent covers, say that specialist will handle it when asked
+directly.
 """.strip()
 
+# The capability list answers "what can I do here?" without widening the rule
+# above: it names specialists the caller may reach, not abilities this mode
+# has. Only agents the caller can already invoke are ever listed, so the model
+# cannot disclose the existence of an agent the user has no access to.
+CAPABILITY_RULES = """
+Specialists this user may ask for directly (you cannot run them yourself in
+this mode, and you must not mention any specialist, database, or tool that is
+absent from this list):
+""".strip()
 
-def build_general_answer_system_prompt(persona: Persona) -> str:
-    return "\n\n".join((persona.preamble(), GENERAL_ANSWER_RULES))
+NO_CAPABILITY_RULES = """
+This user may not reach any specialist agent. Answer general questions only,
+and do not name or describe any specialist, database, or tool.
+""".strip()
+
+# Agent cards are fetched over HTTP from each agent service, so their
+# descriptions are untrusted input to every prompt they land in.
+DESCRIPTION_MAX_LENGTH = 200
+
+
+def _agent_summary(agent: RegisteredAgent) -> str:
+    """Collapse an agent card description to one capped, single-line summary.
+
+    A card carrying newlines or its own "Rules:" section must not be able to
+    restructure the prompt it is interpolated into.
+    """
+    raw = str(agent.card.get("description") or agent.name or agent.agent_id)
+    summary = " ".join(raw.split())
+    if len(summary) > DESCRIPTION_MAX_LENGTH:
+        summary = f"{summary[:DESCRIPTION_MAX_LENGTH].rstrip()}..."
+    return summary
+
+
+def capability_rules(agents: Iterable[RegisteredAgent]) -> str:
+    lines = [f"- {agent.agent_id}: {_agent_summary(agent)}" for agent in agents]
+    if not lines:
+        return NO_CAPABILITY_RULES
+    return "\n".join([CAPABILITY_RULES, *lines])
+
+
+def build_general_answer_system_prompt(
+    persona: Persona,
+    agents: Iterable[RegisteredAgent] = (),
+) -> str:
+    return "\n\n".join(
+        (persona.preamble(), GENERAL_ANSWER_RULES, capability_rules(agents)),
+    )
 
 
 def build_fallback_general_answer(persona: Persona) -> str:
+    # Names no specialist: this static text is shared by every caller, so it
+    # cannot know which agents the reader is allowed to reach.
     return (
         f"{persona.introduction()}. I can take general questions here and "
-        "route procurement or world data questions to their specialist "
-        "agents. The language model is not configured, so I cannot compose "
+        "route domain questions to the specialist agents you have access to. "
+        "The language model is not configured, so I cannot compose "
         "an answer to this question right now."
     )
 
@@ -147,10 +193,7 @@ def fallback_route(message: str, agents: Iterable[RegisteredAgent]) -> str:
 
 def route_system_prompt(agents: Iterable[RegisteredAgent]) -> str:
     routes = ["- general: greetings, small talk, and any other topic."]
-    routes.extend(
-        f"- {agent.agent_id}: {agent.card.get('description') or agent.name}"
-        for agent in agents
-    )
+    routes.extend(f"- {agent.agent_id}: {_agent_summary(agent)}" for agent in agents)
     return "\n".join(
         [ROUTE_SYSTEM_PROMPT_HEADER, "", "Routes:", *routes, "", ROUTE_SYSTEM_PROMPT_RULES],
     )
@@ -211,13 +254,20 @@ async def classify_route(
 async def answer_general(
     message: str,
     langfuse_parent: Context | None = None,
+    agents: Iterable[RegisteredAgent] = (),
 ) -> GeneralAnswer:
-    """Answer a general (non-domain) question with the LLM, or a static fallback."""
+    """Answer a general (non-domain) question with the LLM, or a static fallback.
+
+    `agents` must already be filtered to what the caller may invoke — it is
+    interpolated into the prompt, and the model treats everything in its
+    context as fair game to repeat.
+    """
+    system_prompt = build_general_answer_system_prompt(PERSONA, agents)
     with _generation_span("assistant.answer", "answer", message, langfuse_parent) as span:
         content = await litellm_client.complete(
             span,
             [
-                {"role": "system", "content": GENERAL_ANSWER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
             ],
         )

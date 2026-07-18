@@ -18,6 +18,7 @@ MCP_SERVER_PREFIX = "mcp:"
 INVOKE = "invoke"
 READ = "read"
 EXECUTE = "execute"
+DEFAULT_ADMIN_SUBJECTS = "role:data-admin"
 LEGACY_WORLD_AGENT_ROLE = "agent:world-agent:invoke"
 LEGACY_PROCUREMENT_AGENT_ROLE = "agent:procurement-agent:invoke"
 LEGACY_WORLD_DB_ROLE = "permission:world-db:read"
@@ -195,43 +196,66 @@ def configured_mcp_servers() -> tuple[str, ...]:
 
 
 def _configured_ids(prefix: str, action: str) -> tuple[str, ...]:
-    ids = {
-        rule.object.removeprefix(prefix)
-        for rule in policy_rules()
-        if rule.object.startswith(prefix) and rule.action == action
-    }
-    return tuple(sorted(ids))
+    return tuple(sorted(_subjects_by_object(prefix, action)))
 
 
-def agent_access_rules() -> list[dict[str, Any]]:
-    return _access_rules(AGENT_PREFIX, INVOKE)
-
-
-def data_source_access_rules() -> list[dict[str, Any]]:
-    return _access_rules(DATA_SOURCE_PREFIX, READ)
-
-
-def mcp_server_access_rules() -> list[dict[str, Any]]:
-    return _access_rules(MCP_SERVER_PREFIX, EXECUTE)
-
-
-def _access_rules(prefix: str, action: str) -> list[dict[str, Any]]:
+def _subjects_by_object(prefix: str, action: str) -> dict[str, set[str]]:
+    """Map each governed object id to the policy subjects granted `action` on it."""
     grouped: dict[str, set[str]] = {}
     for rule in policy_rules():
         if rule.object.startswith(prefix) and rule.action == action:
             object_id = rule.object.removeprefix(prefix)
             grouped.setdefault(object_id, set()).add(rule.subject)
+    return grouped
 
-    access_rules = []
-    for object_id, subjects in sorted(grouped.items()):
-        roles = sorted(subjects)
-        access_rules.append(
-            {
-                "id": object_id,
-                "role": roles[0],
-                "roles": roles,
-                "policyObject": f"{prefix}{object_id}",
-                "policyAction": action,
-            },
-        )
-    return access_rules
+
+def admin_subjects() -> tuple[str, ...]:
+    raw = os.getenv("POLICY_ADMIN_SUBJECTS", DEFAULT_ADMIN_SUBJECTS)
+    return tuple(subject.strip() for subject in raw.split(",") if subject.strip())
+
+
+def is_policy_admin(user: dict[str, Any]) -> bool:
+    admins = set(admin_subjects())
+    return any(subject in admins for subject in policy_subjects(user))
+
+
+def access_catalog(
+    prefix: str,
+    action: str,
+    user: dict[str, Any],
+    known_ids: Iterable[str] = (),
+    include_roles: bool = False,
+) -> list[dict[str, Any]]:
+    """List every object of this kind with whether `user` may act on it.
+
+    Objects come from two independent sources that can disagree: the policy
+    file (what is governed) and the caller-supplied registry ids (what is
+    actually running). Listing the union surfaces that drift instead of
+    hiding it — a running service with no policy row is reported as
+    ungoverned and, since casbin is deny-by-default, not allowed.
+
+    `roles` names the subjects that would grant access, so it is only
+    included for policy admins.
+    """
+    grouped = _subjects_by_object(prefix, action)
+    subjects = policy_subjects(user)
+    tenant_id = user["tenant_id"]
+
+    entries: list[dict[str, Any]] = []
+    for object_id in sorted(set(grouped) | set(known_ids)):
+        entry: dict[str, Any] = {
+            "id": object_id,
+            "allowed": is_allowed_subjects(
+                subjects,
+                tenant_id,
+                f"{prefix}{object_id}",
+                action,
+            ),
+            "governed": object_id in grouped,
+            "policyObject": f"{prefix}{object_id}",
+            "policyAction": action,
+        }
+        if include_roles:
+            entry["roles"] = sorted(grouped.get(object_id, set()))
+        entries.append(entry)
+    return entries

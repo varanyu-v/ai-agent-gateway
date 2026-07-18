@@ -1079,6 +1079,7 @@
 
       const state = {
         config: null,
+        catalog: null,
         token: "",
         claims: null,
         permissions: null,
@@ -1200,15 +1201,17 @@
       }
 
       function agentPolicy(agentId) {
-        return (state.config?.agents || []).find((agent) => agent.id === agentId);
+        return (state.catalog?.agents || []).find((agent) => agent.id === agentId);
       }
 
       function permissionPolicy(permissionId) {
-        return (state.config?.tools || []).find((tool) => tool.id === permissionId);
+        return (state.catalog?.dataSources || []).find(
+          (source) => source.id === permissionId,
+        );
       }
 
       function toolPolicy(toolId) {
-        return (state.config?.toolPolicies || []).find((tool) => tool.id === toolId);
+        return (state.catalog?.mcpServers || []).find((server) => server.id === toolId);
       }
 
       function agentSubjectLabel(agentId) {
@@ -1233,6 +1236,10 @@
       }
 
       function isAllowedByPolicy(item, subjects, allowedKey) {
+        // /catalog decides access server-side; the rest is legacy fallback.
+        if (typeof item.allowed === "boolean") {
+          return item.allowed;
+        }
         const allowedIds = state.permissions?.[allowedKey];
         if (Array.isArray(allowedIds)) {
           return allowedIds.includes(item.id);
@@ -1241,7 +1248,10 @@
       }
 
       function accessSubjectLabel(item) {
-        return accessSubjects(item).join(", ");
+        // Granting subjects are only served to policy admins, so fall back to
+        // the policy object every caller is allowed to see.
+        const subjects = accessSubjects(item);
+        return subjects.length ? subjects.join(", ") : item.policyObject || item.id;
       }
 
       function expectedResultForSample(sample, username, agentAllowed, permissionAllowed) {
@@ -1299,20 +1309,20 @@
         els.toolAccessList.replaceChildren();
         renderSamples();
 
-        if (!state.claims || !state.config) {
+        if (!state.claims || !state.catalog) {
           els.accessPanel.hidden = true;
           return;
         }
 
         const subjects = activePolicySubjects();
-        (state.config.agents || []).forEach((agent) => {
+        (state.catalog.agents || []).forEach((agent) => {
           const allowed = isAllowedByPolicy(agent, subjects, "allowedAgents");
           els.agentAccessList.append(accessItem(agent, allowed));
         });
 
-        (state.config.tools || []).forEach((tool) => {
-          const allowed = isAllowedByPolicy(tool, subjects, "allowedDataSources");
-          els.toolAccessList.append(accessItem(tool, allowed));
+        (state.catalog.dataSources || []).forEach((source) => {
+          const allowed = isAllowedByPolicy(source, subjects, "allowedDataSources");
+          els.toolAccessList.append(accessItem(source, allowed));
         });
 
         els.accessPanel.hidden = false;
@@ -1538,6 +1548,7 @@
         state.token = "";
         state.claims = null;
         state.permissions = null;
+        state.catalog = null;
         state.currentInput = "";
         state.currentRunId = "";
         state.initialResponse = null;
@@ -1558,6 +1569,7 @@
         state.token = token;
         state.claims = decodeJwt(token);
         state.permissions = null;
+        state.catalog = null;
         const username = state.claims.preferred_username || els.username.value;
         els.tokenStatus.textContent = "Token ready";
         els.tokenStatus.className = "pill ok";
@@ -1581,8 +1593,23 @@
         }
 
         state.permissions = data;
+        await loadCatalog();
         renderClaims();
         renderAccess();
+      }
+
+      async function loadCatalog() {
+        const response = await fetch("/catalog", {
+          headers: {
+            Authorization: `Bearer ${state.token}`,
+          },
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || `Catalog request failed: ${response.status}`);
+        }
+
+        state.catalog = data;
       }
 
       function applyPreset(index) {
