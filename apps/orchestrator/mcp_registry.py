@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from apps.orchestrator.registry import parse_agent_services
+from apps.orchestrator.agent_registry import parse_agent_services
 
 
 DEFAULT_MCP_SERVICES = (

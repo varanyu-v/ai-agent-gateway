@@ -8,7 +8,7 @@ from apps.agents import runtime
 from apps.agents.procurement.main import app as procurement_app
 from apps.agents.world import main as world_main
 from apps.agents.world.main import app as world_app
-from apps.orchestrator.registry import (
+from apps.orchestrator.agent_registry import (
     AgentRegistry,
     AgentServiceError,
     parse_agent_services,

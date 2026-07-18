@@ -31,7 +31,7 @@ from apps.langfuse_utils import (
     record_span_error,
 )
 from apps.observability import clean_attributes, setup_langfuse_observability
-from apps.orchestrator.registry import RegisteredAgent
+from apps.orchestrator.agent_registry import RegisteredAgent
 
 
 ROUTER_AGENT_ID = os.getenv("ROUTER_AGENT_ID", "assistant")

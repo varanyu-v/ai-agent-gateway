@@ -57,7 +57,7 @@ from apps.orchestrator.mcp_registry import (
     DEFAULT_MCP_SERVICES,
     McpRegistry,
 )
-from apps.orchestrator.registry import (
+from apps.orchestrator.agent_registry import (
     DEFAULT_AGENT_SERVICES,
     AgentRegistry,
     AgentServiceError,

@@ -12,7 +12,7 @@ import httpx
 
 from apps.orchestrator import main as orchestrator
 from apps.orchestrator import router
-from apps.orchestrator.registry import DEFAULT_AGENT_SERVICES, AgentRegistry, RegisteredAgent
+from apps.orchestrator.agent_registry import DEFAULT_AGENT_SERVICES, AgentRegistry, RegisteredAgent
 
 
 RUN_ID = "run-router-1"
