@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import httpx
 
+from apps import litellm_client
 from apps.orchestrator import main as orchestrator
 from apps.orchestrator import router
 from apps.orchestrator.agent_registry import DEFAULT_AGENT_SERVICES, AgentRegistry, RegisteredAgent
@@ -63,8 +64,8 @@ class RouterTestCase(unittest.IsolatedAsyncioTestCase):
         for patcher in (
             patch.object(orchestrator, "publish", fake_publish),
             patch.object(orchestrator, "agent_registry", AgentRegistry(DEFAULT_AGENT_SERVICES)),
-            patch.object(router, "LITELLM_API_KEY", ""),
-            patch.object(router, "LITELLM_MODEL", ""),
+            patch.object(litellm_client, "API_KEY", ""),
+            patch.object(litellm_client, "MODEL", ""),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -110,7 +111,7 @@ class ClassifyRouteTests(unittest.IsolatedAsyncioTestCase):
         async def fake_completion(span, messages) -> str:
             return '{"route":"procurement-agent","reason":"supplier data"}'
 
-        with patch.object(router, "_litellm_completion", fake_completion):
+        with patch.object(litellm_client, "complete", fake_completion):
             decision = await router.classify_route("supplier question", registry_agents())
 
         self.assertEqual(decision.target, "procurement-agent")
@@ -121,7 +122,7 @@ class ClassifyRouteTests(unittest.IsolatedAsyncioTestCase):
         async def fake_completion(span, messages) -> str:
             return '{"route":"nonexistent-agent"}'
 
-        with patch.object(router, "_litellm_completion", fake_completion):
+        with patch.object(litellm_client, "complete", fake_completion):
             decision = await router.classify_route(
                 "list countries by population",
                 registry_agents(),
@@ -134,7 +135,7 @@ class ClassifyRouteTests(unittest.IsolatedAsyncioTestCase):
         async def fake_completion(span, messages) -> str:
             return "not json"
 
-        with patch.object(router, "_litellm_completion", fake_completion):
+        with patch.object(litellm_client, "complete", fake_completion):
             decision = await router.classify_route("hello there", registry_agents())
 
         self.assertEqual(decision.target, router.GENERAL_ROUTE)

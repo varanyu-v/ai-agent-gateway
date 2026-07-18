@@ -17,21 +17,13 @@ fallback) speaks in the configurable gateway persona (apps/persona.py).
 import json
 import os
 import re
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterable
 
-import httpx
 from opentelemetry.context import Context
-from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
-from apps.langfuse_utils import (
-    langfuse_json,
-    langfuse_payload,
-    litellm_usage_attributes,
-    record_span_error,
-)
-from apps.observability import clean_attributes, setup_langfuse_observability
+from apps import litellm_client
+from apps.observability import setup_langfuse_observability
 from apps.orchestrator.agent_registry import RegisteredAgent
 from apps.persona import PERSONA, Persona
 
@@ -39,11 +31,6 @@ from apps.persona import PERSONA, Persona
 ROUTER_AGENT_ID = os.getenv("ROUTER_AGENT_ID", "assistant")
 ROUTER_WORKFLOW = "assistant"
 GENERAL_ROUTE = "general"
-
-LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000/v1").rstrip("/")
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "")
-LITELLM_TIMEOUT_SECONDS = float(os.getenv("LITELLM_TIMEOUT_SECONDS", "30"))
 
 # Deterministic fallback vocabulary per agent workflow, used when the LLM
 # router is not configured or fails. Single words match whole words only;
@@ -169,87 +156,15 @@ def route_system_prompt(agents: Iterable[RegisteredAgent]) -> str:
     )
 
 
-@contextmanager
 def _generation_span(name: str, kind: str, message: str, parent_context: Context | None):
-    span = langfuse_tracer.start_span(
+    return litellm_client.generation_span(
+        langfuse_tracer,
         name,
-        context=parent_context if parent_context is not None else Context(),
-        kind=SpanKind.CLIENT,
-        attributes=clean_attributes(
-            {
-                "app.workflow": ROUTER_WORKFLOW,
-                "app.planner.model": LITELLM_MODEL or None,
-                "app.user_message.length": len(message),
-                "gen_ai.operation.name": "chat",
-                "gen_ai.system": "openai",
-                "gen_ai.request.model": LITELLM_MODEL or None,
-                "langfuse.observation.type": "generation",
-                "langfuse.observation.model.name": LITELLM_MODEL or None,
-                "langfuse.observation.metadata.kind": kind,
-                "langfuse.observation.metadata.provider": "litellm",
-            },
-        ),
+        ROUTER_WORKFLOW,
+        message,
+        kind,
+        parent_context,
     )
-    try:
-        yield span
-    except BaseException as exc:
-        record_span_error(span, exc)
-        raise
-    finally:
-        span.end()
-
-
-async def _litellm_completion(span: Span, messages: list[dict[str, str]]) -> str | None:
-    if not LITELLM_API_KEY or not LITELLM_MODEL:
-        span.set_attribute("app.planner.result", "not_configured")
-        return None
-
-    span.set_attribute(
-        "langfuse.observation.input",
-        langfuse_json(langfuse_payload(messages)),
-    )
-    try:
-        async with httpx.AsyncClient(timeout=LITELLM_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{LITELLM_BASE_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {LITELLM_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": LITELLM_MODEL,
-                    "temperature": 0,
-                    "messages": messages,
-                },
-            )
-            span.set_attribute("http.response.status_code", response.status_code)
-            response.raise_for_status()
-        response_body = response.json()
-        content = str(response_body["choices"][0]["message"]["content"])
-    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-        span.record_exception(exc)
-        span.set_status(Status(StatusCode.ERROR, "LiteLLM call failed"))
-        span.set_attributes(
-            {
-                "app.planner.result": "fallback",
-                "langfuse.observation.level": "ERROR",
-                "langfuse.observation.status_message": str(exc),
-            },
-        )
-        return None
-
-    span.set_attributes(
-        clean_attributes(
-            {
-                "gen_ai.response.model": response_body.get("model") or LITELLM_MODEL,
-                "langfuse.observation.model.name": response_body.get("model")
-                or LITELLM_MODEL,
-                "langfuse.observation.output": langfuse_json(langfuse_payload(content)),
-            },
-        ),
-    )
-    span.set_attributes(litellm_usage_attributes(response_body.get("usage")))
-    return content
 
 
 async def classify_route(
@@ -260,7 +175,7 @@ async def classify_route(
     """Pick a registered agent or "general" for the message."""
     allowed_routes = {agent.agent_id for agent in agents}
     with _generation_span("assistant.route", "router", message, langfuse_parent) as span:
-        content = await _litellm_completion(
+        content = await litellm_client.complete(
             span,
             [
                 {"role": "system", "content": route_system_prompt(agents)},
@@ -299,7 +214,7 @@ async def answer_general(
 ) -> GeneralAnswer:
     """Answer a general (non-domain) question with the LLM, or a static fallback."""
     with _generation_span("assistant.answer", "answer", message, langfuse_parent) as span:
-        content = await _litellm_completion(
+        content = await litellm_client.complete(
             span,
             [
                 {"role": "system", "content": GENERAL_ANSWER_SYSTEM_PROMPT},

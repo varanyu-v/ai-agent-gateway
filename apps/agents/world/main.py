@@ -51,6 +51,19 @@ DATA_KEYWORDS = (
     "sql",
 )
 
+# A multi-row / ranking lookup answered by SQL, even when the message also
+# mentions "country" (e.g. "top cities by population with country context").
+# The single-country "country" profile action must not steal these.
+CITY_LOOKUP_KEYWORDS = (
+    "city",
+    "cities",
+    "largest",
+    "biggest",
+    "top",
+    "rank",
+    "list",
+)
+
 CHAT_FALLBACK_REPLY = (
     f"Hello! {PERSONA.introduction('the world analyst agent')}. Ask me about "
     "countries, cities, populations, and languages — for example: 'show the "
@@ -65,8 +78,11 @@ Data actions for this agent:
     country(code, name, continent, region, population)
     country_language(country_code, language, is_official, percentage)
   Join city.country_code = country.code. Always end with LIMIT (50 or less).
-- "country": one country profile with languages. Set arguments.country_code
-  to the ISO code (e.g. THA, FR).
+- "country": a profile of ONE named country with its languages. Set
+  arguments.country_code to that country's ISO code (e.g. THA, FR). Do not use
+  this for city rankings or multi-row lookups, even when the message also asks
+  for country attributes ("cities ... with country context") — use "sql" and
+  JOIN city.country_code = country.code instead.
 - "report": world market report generation. No arguments.
 - "brief": multi-step world market brief. No arguments.
 """.strip()
@@ -80,7 +96,9 @@ def fallback_action(message: str) -> str:
         return "brief"
     if "report" in text:
         return "report"
-    if "country" in text:
+    # "country" is a weak signal: pick the single-country profile only when the
+    # message is not a city/ranking lookup that merely asks for country context.
+    if "country" in text and not any(k in text for k in CITY_LOOKUP_KEYWORDS):
         return "country"
     if any(keyword in text for keyword in DATA_KEYWORDS):
         return "sql"

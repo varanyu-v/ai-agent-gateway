@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
+from apps import litellm_client
 from apps.agents import runtime
 from apps.agents.procurement.main import app as procurement_app
 from apps.agents.world import main as world_main
@@ -77,7 +78,7 @@ class AgentDecisionTests(unittest.IsolatedAsyncioTestCase):
     """With no LiteLLM configured, the deterministic fallback planner routes."""
 
     def setUp(self) -> None:
-        patcher = patch.object(runtime, "LITELLM_API_KEY", "")
+        patcher = patch.object(litellm_client, "API_KEY", "")
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -268,6 +269,38 @@ class PlannedArgumentTests(unittest.TestCase):
         self.assertEqual(
             decision.tool_input,
             {"server": "procurement-mcp", "name": "run_sql", "arguments": {"sql": sql}},
+        )
+
+
+class WorldFallbackActionTests(unittest.TestCase):
+    """Deterministic fallback routing when the LLM planner is unavailable."""
+
+    def test_city_ranking_with_country_context_is_sql_not_country_profile(self) -> None:
+        # A cities-by-population query that merely mentions "country context"
+        # must not be hijacked by the single-country profile action.
+        self.assertEqual(
+            world_main.fallback_action(
+                "show top 10 largest cities by population with country context",
+            ),
+            "sql",
+        )
+
+    def test_compare_cities_and_country_is_sql(self) -> None:
+        self.assertEqual(
+            world_main.fallback_action("compare cities and their country"),
+            "sql",
+        )
+
+    def test_single_country_overview_still_routes_to_country(self) -> None:
+        self.assertEqual(
+            world_main.fallback_action("give me a country overview for THA"),
+            "country",
+        )
+
+    def test_largest_cities_is_sql(self) -> None:
+        self.assertEqual(
+            world_main.fallback_action("largest cities in Asia"),
+            "sql",
         )
 
 

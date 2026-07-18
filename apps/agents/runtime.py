@@ -27,7 +27,6 @@ parented to the orchestrator's `agent-run` root through the
 import asyncio
 import json
 import os
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
 
@@ -38,17 +37,16 @@ from langgraph.graph import END, StateGraph
 from langgraph.store.memory import InMemoryStore
 from opentelemetry import trace as otel_trace
 from opentelemetry.context import Context
-from opentelemetry.trace import SpanKind, Status, StatusCode, Tracer
+from opentelemetry.trace import SpanKind, Tracer
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
+from apps import litellm_client
 from apps.langfuse_utils import (
     build_trace_attributes,
     context_from_traceparent,
     langfuse_json,
     langfuse_payload,
-    litellm_usage_attributes,
-    record_span_error,
     trace_id_hex,
 )
 from apps.observability import (
@@ -61,10 +59,7 @@ from apps.persona import PERSONA, Persona
 
 AGENT_PROTOCOL = "ptvn.agent/v1"
 
-LITELLM_BASE_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000/v1").rstrip("/")
-LITELLM_API_KEY = os.getenv("LITELLM_API_KEY", "")
-LITELLM_MODEL = os.getenv("LITELLM_MODEL", "")
-LITELLM_TIMEOUT_SECONDS = float(os.getenv("LITELLM_TIMEOUT_SECONDS", "30"))
+PLANNER_ERROR_MESSAGE = "LiteLLM planning failed"
 
 # Tool-broker callback API (async runs). Agents call back into the
 # orchestrator to request tools, poll results, and report the final outcome.
@@ -359,7 +354,6 @@ def planner_trace_context(request: AgentRunRequest) -> dict[str, Any]:
     }
 
 
-@contextmanager
 def langfuse_generation_span(
     langfuse_tracer: Tracer,
     workflow: str,
@@ -367,34 +361,20 @@ def langfuse_generation_span(
     context: dict[str, Any] | None,
     parent_context: Context | None,
 ):
-    """Record a planner generation under the orchestrator's Langfuse root."""
-    span = langfuse_tracer.start_span(
+    """Record a planner generation under the orchestrator's Langfuse root.
+
+    The agent-run trace attributes are what distinguish this from the
+    orchestrator's own generations; the rest is the shared client's span.
+    """
+    return litellm_client.generation_span(
+        langfuse_tracer,
         "agent.llm_plan",
-        context=parent_context if parent_context is not None else Context(),
-        kind=SpanKind.CLIENT,
-        attributes=clean_attributes(
-            {
-                "app.workflow": workflow,
-                "app.planner.model": LITELLM_MODEL or None,
-                "app.user_message.length": len(message),
-                "gen_ai.operation.name": "chat",
-                "gen_ai.system": "openai",
-                "gen_ai.request.model": LITELLM_MODEL or None,
-                "langfuse.observation.type": "generation",
-                "langfuse.observation.model.name": LITELLM_MODEL or None,
-                "langfuse.observation.metadata.kind": "planner",
-                "langfuse.observation.metadata.provider": "litellm",
-                **build_trace_attributes(workflow, context),
-            },
-        ),
+        workflow,
+        message,
+        "planner",
+        parent_context,
+        build_trace_attributes(workflow, context),
     )
-    try:
-        yield span
-    except BaseException as exc:
-        record_span_error(span, exc)
-        raise
-    finally:
-        span.end()
 
 
 async def litellm_plan_action(
@@ -411,20 +391,15 @@ async def litellm_plan_action(
         context,
         parent_context,
     ) as span:
-        if not LITELLM_API_KEY or not LITELLM_MODEL:
-            span.set_attribute("app.planner.result", "not_configured")
-            return None
-
         allowed_actions = definition.actions
         guidance = (
             f"Agent guidance:\n{definition.planner_guidance}\n"
             if definition.planner_guidance
             else ""
         )
-        payload = {
-            "model": LITELLM_MODEL,
-            "temperature": 0,
-            "messages": [
+        content = await litellm_client.complete(
+            span,
+            [
                 {"role": "system", "content": LLM_PLANNER_SYSTEM_PROMPT},
                 {
                     "role": "user",
@@ -436,61 +411,16 @@ async def litellm_plan_action(
                     ),
                 },
             ],
-        }
-        span.set_attribute(
-            "langfuse.observation.input",
-            langfuse_json(langfuse_payload(payload["messages"])),
+            PLANNER_ERROR_MESSAGE,
         )
-        headers = {
-            "Authorization": f"Bearer {LITELLM_API_KEY}",
-            "Content-Type": "application/json",
-        }
+        if content is None:
+            return None
 
+        # The planner prompt demands JSON; anything else is a failed generation.
         try:
-            async with httpx.AsyncClient(timeout=LITELLM_TIMEOUT_SECONDS) as client:
-                response = await client.post(
-                    f"{LITELLM_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
-                span.set_attribute("http.response.status_code", response.status_code)
-                response.raise_for_status()
-
-            response_body = response.json()
-            content = response_body["choices"][0]["message"]["content"]
-            span.set_attributes(
-                clean_attributes(
-                    {
-                        "gen_ai.response.model": response_body.get("model")
-                        or LITELLM_MODEL,
-                        "langfuse.observation.model.name": response_body.get("model")
-                        or LITELLM_MODEL,
-                        "langfuse.observation.output": langfuse_json(
-                            langfuse_payload(content),
-                        ),
-                    },
-                ),
-            )
-            span.set_attributes(
-                litellm_usage_attributes(response_body.get("usage")),
-            )
             decision = json.loads(content)
-        except (
-            httpx.HTTPError,
-            KeyError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, "LiteLLM planning failed"))
-            span.set_attributes(
-                {
-                    "app.planner.result": "fallback",
-                    "langfuse.observation.level": "ERROR",
-                    "langfuse.observation.status_message": str(exc),
-                },
-            )
+        except (TypeError, ValueError) as exc:
+            litellm_client.record_failure(span, exc, PLANNER_ERROR_MESSAGE)
             return None
 
         action = str(decision.get("action", "")).strip().lower()
