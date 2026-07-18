@@ -32,6 +32,7 @@ from apps.gateway.traffic import (
     payload_fingerprint,
 )
 from apps.observability import clean_attributes, setup_observability
+from apps.persona import PERSONA
 
 
 UI_FILE = Path(__file__).resolve().parents[1] / "frontend" / "index.html"
@@ -187,6 +188,10 @@ async def ui_config() -> dict[str, Any]:
         "keycloakTokenUrl": f"{settings.issuer}/protocol/openid-connect/token",
         "keycloakClientId": settings.keycloak_client_id,
         "audience": settings.audience,
+        "assistant": {
+            "name": PERSONA.name,
+            "welcomeMessage": PERSONA.welcome,
+        },
         "policyMode": "casbin",
         "agents": agent_access_rules(),
         "tools": data_source_access_rules(),

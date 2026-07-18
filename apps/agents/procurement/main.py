@@ -20,6 +20,7 @@ from apps.agents.runtime import (
     PlannedAction,
     create_agent_app,
 )
+from apps.persona import PERSONA
 
 
 RISK_LEVELS = ("high", "medium", "low")
@@ -45,9 +46,9 @@ DATA_KEYWORDS = (
 )
 
 CHAT_FALLBACK_REPLY = (
-    "Hello! I'm the procurement analyst agent. Ask me about suppliers, "
-    "purchase orders, spend, and risk — for example: 'rank suppliers by "
-    "total spend' or 'show recent blocked purchase orders'."
+    f"Hello! {PERSONA.introduction('the procurement analyst agent')}. Ask me "
+    "about suppliers, purchase orders, spend, and risk — for example: 'rank "
+    "suppliers by total spend' or 'show recent blocked purchase orders'."
 )
 
 PLANNER_GUIDANCE = """

@@ -56,6 +56,7 @@ from apps.observability import (
     setup_langfuse_observability,
     setup_observability,
 )
+from apps.persona import PERSONA, Persona
 
 
 AGENT_PROTOCOL = "ptvn.agent/v1"
@@ -77,7 +78,7 @@ TOOL_BROKER_POLL_INTERVAL_SECONDS = float(
 )
 TOOL_BROKER_TIMEOUT_SECONDS = float(os.getenv("TOOL_BROKER_TIMEOUT_SECONDS", "120"))
 
-LLM_PLANNER_SYSTEM_PROMPT = """
+LLM_PLANNER_RULES = """
 You plan one enterprise agent run: pick exactly one workflow action for the
 user's message and, for data actions, the arguments that answer it.
 Return only a JSON object with this shape:
@@ -97,6 +98,17 @@ Rules:
   request describes; never invent argument fields it does not mention.
 - Leave "reply" empty for every action except "chat".
 """.strip()
+
+
+def build_planner_system_prompt(persona: Persona) -> str:
+    """Planner rules plus the gateway persona for the "reply" text; the
+    persona block is omitted entirely when nothing is configured."""
+    return "\n\n".join(
+        part for part in (LLM_PLANNER_RULES, persona.reply_rules()) if part
+    )
+
+
+LLM_PLANNER_SYSTEM_PROMPT = build_planner_system_prompt(PERSONA)
 
 
 class AgentRunRequest(BaseModel):

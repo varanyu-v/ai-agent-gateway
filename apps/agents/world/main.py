@@ -29,6 +29,7 @@ from apps.agents.runtime import (
     ToolBrokerClient,
     create_agent_app,
 )
+from apps.persona import PERSONA
 
 
 DATA_KEYWORDS = (
@@ -51,9 +52,9 @@ DATA_KEYWORDS = (
 )
 
 CHAT_FALLBACK_REPLY = (
-    "Hello! I'm the world analyst agent. Ask me about countries, cities, "
-    "populations, and languages — for example: 'show the largest cities in "
-    "Asia' or 'give me a country overview for THA'."
+    f"Hello! {PERSONA.introduction('the world analyst agent')}. Ask me about "
+    "countries, cities, populations, and languages — for example: 'show the "
+    "largest cities in Asia' or 'give me a country overview for THA'."
 )
 
 PLANNER_GUIDANCE = """

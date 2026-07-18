@@ -333,7 +333,7 @@
 
     <!-- Chat -->
     <header class="chat-header" id="chatHeader" hidden>
-      <span class="title">PTVN Assistant</span>
+      <span class="title" id="chatTitle">PTVN Assistant</span>
       <span class="who">
         <span id="whoAmI"></span>
         <button id="logoutBtn" type="button">Sign out</button>
@@ -360,7 +360,9 @@
       const ASSISTANT_AGENT = "assistant";
       const POLL_INTERVAL_MS = 800;
       const POLL_MAX_ATTEMPTS = 60;
-      const WELCOME_MESSAGE =
+      // Defaults when the gateway's /ui/config carries no assistant persona.
+      const DEFAULT_TITLE = "PTVN Assistant";
+      const DEFAULT_WELCOME_MESSAGE =
         "Hi! I can answer general questions and look up world and " +
         "procurement data for you. What would you like to know?";
 
@@ -382,6 +384,7 @@
         username: document.getElementById("username"),
         password: document.getElementById("password"),
         chatHeader: document.getElementById("chatHeader"),
+        chatTitle: document.getElementById("chatTitle"),
         messagesView: document.getElementById("messagesView"),
         messages: document.getElementById("messages"),
         composerView: document.getElementById("composerView"),
@@ -404,12 +407,15 @@
       }
 
       function showChat() {
+        const assistant = (state.config && state.config.assistant) || {};
         els.loginView.hidden = true;
         els.chatHeader.hidden = false;
         els.messagesView.hidden = false;
         els.composerView.hidden = false;
+        els.chatTitle.textContent = assistant.name || DEFAULT_TITLE;
+        document.title = assistant.name || DEFAULT_TITLE;
         els.whoAmI.textContent = state.username;
-        addAgentText(WELCOME_MESSAGE);
+        addAgentText(assistant.welcomeMessage || DEFAULT_WELCOME_MESSAGE);
         els.messageInput.focus();
       }
 

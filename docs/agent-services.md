@@ -106,6 +106,31 @@ candidates come from the registry, adding a new agent service to
 `AGENT_SERVICES` extends the router without code changes. Grant
 `agent:assistant` `invoke` in the Casbin policy to let a role use the router.
 
+## Assistant persona (`ASSISTANT_*`)
+
+Every user-facing answer across the gateway speaks in one configurable
+persona, defined in `apps/persona.py` and set through environment variables
+(shared by all services via the compose `x-app-env` anchor):
+
+| Variable | Purpose |
+| --- | --- |
+| `ASSISTANT_NAME` | Introduction name, e.g. `Taokae Procurement Agent` |
+| `ASSISTANT_ROLE` | Role phrase after the name; defaults to "the enterprise gateway assistant" |
+| `ASSISTANT_GENDER` | Persona gender; picks polite/self-referential forms in gendered languages (Thai ครับ/ค่ะ) |
+| `ASSISTANT_TONE` | Voice, e.g. `warm, professional, and concise` |
+| `ASSISTANT_STYLE` | Free-form extra voice instructions |
+| `ASSISTANT_PERSONA_PROMPT` | Escape hatch: replaces the generated persona block wholesale |
+| `ASSISTANT_WELCOME_MESSAGE` | Chat UI welcome bubble |
+
+The persona reaches four surfaces: the supervisor router's general-answer
+prompt, the shared LLM planner's `"reply"` text in every agent service, the
+static no-LLM fallback replies, and the chat UI header/welcome (served
+through `/ui/config`). It carries voice only — capability rules (what an
+agent may claim to do or access) stay hardcoded next to each prompt, so
+branding can never widen an agent's abilities. With no `ASSISTANT_*`
+variables set, all prompts keep the neutral default voice. Values are read
+once at service start; restart to apply changes.
+
 ## Agent service contract
 
 Any agent service must implement three endpoints. The two shipped agents get

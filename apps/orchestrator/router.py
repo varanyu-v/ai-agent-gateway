@@ -10,7 +10,8 @@ orchestrator's normal policy-enforced run path.
 Classification candidates are built from the live agent registry, so adding a
 new agent service to AGENT_SERVICES extends the router without code changes.
 Both LLM calls are recorded as Langfuse generations under the run's
-`agent-run` root span.
+`agent-run` root span. User-visible text (general answers and the static
+fallback) speaks in the configurable gateway persona (apps/persona.py).
 """
 
 import json
@@ -32,6 +33,7 @@ from apps.langfuse_utils import (
 )
 from apps.observability import clean_attributes, setup_langfuse_observability
 from apps.orchestrator.agent_registry import RegisteredAgent
+from apps.persona import PERSONA, Persona
 
 
 ROUTER_AGENT_ID = os.getenv("ROUTER_AGENT_ID", "assistant")
@@ -85,18 +87,31 @@ Rules:
 - When unsure, pick "general".
 """.strip()
 
-GENERAL_ANSWER_SYSTEM_PROMPT = """
-You are the enterprise gateway assistant. Answer the user's question directly,
-concisely, and helpfully. You have no access to company databases or tools in
-this mode; if the question needs procurement or world data, say that the
-matching specialist agent will handle it when asked directly.
+# Capability rules stay hardcoded (not part of the configurable persona) so
+# branding can never widen or misstate what this mode may claim to access.
+GENERAL_ANSWER_RULES = """
+Answer the user's question directly, concisely, and helpfully. You have no
+access to company databases or tools in this mode; if the question needs
+procurement or world data, say that the matching specialist agent will handle
+it when asked directly.
 """.strip()
 
-FALLBACK_GENERAL_ANSWER = (
-    "I can take general questions here and route procurement or world data "
-    "questions to their specialist agents. The language model is not "
-    "configured, so I cannot compose an answer to this question right now."
-)
+
+def build_general_answer_system_prompt(persona: Persona) -> str:
+    return "\n\n".join((persona.preamble(), GENERAL_ANSWER_RULES))
+
+
+def build_fallback_general_answer(persona: Persona) -> str:
+    return (
+        f"{persona.introduction()}. I can take general questions here and "
+        "route procurement or world data questions to their specialist "
+        "agents. The language model is not configured, so I cannot compose "
+        "an answer to this question right now."
+    )
+
+
+GENERAL_ANSWER_SYSTEM_PROMPT = build_general_answer_system_prompt(PERSONA)
+FALLBACK_GENERAL_ANSWER = build_fallback_general_answer(PERSONA)
 
 
 @dataclass(frozen=True)
