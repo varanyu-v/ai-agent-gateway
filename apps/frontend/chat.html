@@ -18,6 +18,9 @@
         --bubble-agent: #ffffff;
         --error: #b42318;
         --shadow: 0 1px 3px rgba(16, 24, 40, 0.08);
+        --code-bg: #f6f7f9;
+        --code-border: #e2e5ea;
+        --quote-bar: #cdd3dd;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -32,6 +35,9 @@
           --bubble-agent: #1f2739;
           --error: #f97066;
           --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+          --code-bg: #131926;
+          --code-border: #2a3247;
+          --quote-bar: #3a4a63;
         }
       }
       * {
@@ -148,6 +154,11 @@
         font-size: 13px;
         cursor: pointer;
       }
+      .chat-header .btn-new-chat {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+        font-weight: 600;
+      }
       .messages {
         flex: 1;
         overflow-y: auto;
@@ -174,6 +185,10 @@
         line-height: 1.5;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
+      }
+      /* Markdown-rendered bubbles manage their own block spacing. */
+      .bubble.md {
+        white-space: normal;
       }
       .msg.user .bubble {
         background: var(--bubble-user);
@@ -216,6 +231,136 @@
       tr:last-child td {
         border-bottom: none;
       }
+      /* ---------- Markdown ---------- */
+      .md > :first-child {
+        margin-top: 0;
+      }
+      .md > :last-child {
+        margin-bottom: 0;
+      }
+      .md p {
+        margin: 0 0 10px;
+      }
+      .md h1,
+      .md h2,
+      .md h3,
+      .md h4,
+      .md h5,
+      .md h6 {
+        margin: 18px 0 8px;
+        line-height: 1.3;
+        font-weight: 650;
+      }
+      .md h1 {
+        font-size: 20px;
+      }
+      .md h2 {
+        font-size: 18px;
+      }
+      .md h3 {
+        font-size: 16px;
+      }
+      .md h4,
+      .md h5,
+      .md h6 {
+        font-size: 15px;
+        color: var(--text-muted);
+      }
+      .md ul,
+      .md ol {
+        margin: 0 0 10px;
+        padding-left: 22px;
+      }
+      .md li {
+        margin: 3px 0;
+      }
+      .md li > ul,
+      .md li > ol {
+        margin: 3px 0 0;
+      }
+      .md a {
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .md blockquote {
+        margin: 0 0 10px;
+        padding: 2px 0 2px 14px;
+        border-left: 3px solid var(--quote-bar);
+        color: var(--text-muted);
+      }
+      .md hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 14px 0;
+      }
+      .md img {
+        max-width: 100%;
+        border-radius: 8px;
+      }
+      .md code {
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 0.88em;
+      }
+      /* Inline code only — code inside <pre> inherits the block styling. */
+      .md :not(pre) > code {
+        background: var(--code-bg);
+        border: 1px solid var(--code-border);
+        border-radius: 5px;
+        padding: 1px 5px;
+      }
+      .md-code {
+        margin: 0 0 10px;
+        border: 1px solid var(--code-border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--code-bg);
+      }
+      .md-code-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 5px 8px 5px 12px;
+        border-bottom: 1px solid var(--code-border);
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .md-code-lang {
+        text-transform: lowercase;
+        letter-spacing: 0.02em;
+      }
+      .md-copy {
+        border: 1px solid var(--code-border);
+        background: var(--surface);
+        color: var(--text-muted);
+        border-radius: 6px;
+        padding: 3px 9px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .md-copy:hover {
+        color: var(--text);
+      }
+      .md-code pre {
+        margin: 0;
+        padding: 12px;
+        overflow-x: auto;
+      }
+      .md-code code {
+        white-space: pre;
+      }
+      /* Prose tables wrap; data tables from tool runs keep their nowrap scroll. */
+      .md .table-scroll {
+        margin: 0 0 10px;
+      }
+      .md-table th,
+      .md-table td {
+        white-space: normal;
+      }
+
       .approve-row {
         margin-top: 10px;
       }
@@ -335,6 +480,7 @@
     <header class="chat-header" id="chatHeader" hidden>
       <span class="title" id="chatTitle">PTVN Assistant</span>
       <span class="who">
+        <button id="newChatBtn" class="btn-new-chat" type="button">＋ New chat</button>
         <span id="whoAmI"></span>
         <button id="logoutBtn" type="button">Sign out</button>
       </span>
@@ -370,9 +516,7 @@
         config: null,
         token: "",
         username: "",
-        threadId:
-          (window.crypto && crypto.randomUUID && crypto.randomUUID()) ||
-          `thread-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        threadId: "",
         busy: false,
       };
 
@@ -392,6 +536,7 @@
         sendBtn: document.getElementById("sendBtn"),
         whoAmI: document.getElementById("whoAmI"),
         logoutBtn: document.getElementById("logoutBtn"),
+        newChatBtn: document.getElementById("newChatBtn"),
       };
 
       /* ---------- View state ---------- */
@@ -415,8 +560,383 @@
         els.chatTitle.textContent = assistant.name || DEFAULT_TITLE;
         document.title = assistant.name || DEFAULT_TITLE;
         els.whoAmI.textContent = state.username;
-        addAgentText(assistant.welcomeMessage || DEFAULT_WELCOME_MESSAGE);
+        startNewChat();
+      }
+
+      function newThreadId() {
+        return (
+          (window.crypto && crypto.randomUUID && crypto.randomUUID()) ||
+          `thread-${Date.now()}-${Math.random().toString(36).slice(2)}`
+        );
+      }
+
+      // Drops the transcript and starts a fresh server-side thread. A run that
+      // is still in flight writes into its now-detached bubble and is ignored.
+      function startNewChat() {
+        const assistant = (state.config && state.config.assistant) || {};
+        state.threadId = newThreadId();
+        state.busy = false;
+        els.sendBtn.disabled = false;
+        els.messages.replaceChildren();
+        els.messageInput.value = "";
+        autosize();
+        addAgentMarkdown(assistant.welcomeMessage || DEFAULT_WELCOME_MESSAGE);
         els.messageInput.focus();
+      }
+
+      /* ---------- Markdown ----------
+         A small CommonMark-ish renderer: enough for what the agents emit
+         (headings, lists, tables, code, emphasis, links) without pulling a
+         library into this single-file UI. All text is escaped before any
+         markup is produced, and link targets are scheme-checked. */
+
+      const MD_FENCE = /^ {0,3}(`{3,}|~{3,})\s*([\w+#.-]*)\s*$/;
+      const MD_FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})\s*$/;
+      const MD_HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+      const MD_HR = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
+      const MD_QUOTE = /^ {0,3}>[ \t]?(.*)$/;
+      const MD_UL = /^([ \t]*)([-*+])[ \t]+(.*)$/;
+      const MD_OL = /^([ \t]*)(\d{1,9})[.)][ \t]+(.*)$/;
+      const MD_TABLE_DIVIDER =
+        /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+      const SAFE_URL = /^(?:https?:\/\/|mailto:|tel:|#|\/|\.{1,2}\/)/i;
+      const BARE_EMAIL = /^[\w.+-]+@[\w-]+\.[\w.-]+$/;
+
+      function escapeHtml(text) {
+        return String(text)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      // Returns a usable href, or null when the scheme isn't one we allow
+      // (blocks javascript:, data:, and friends).
+      function safeUrl(url) {
+        const trimmed = String(url).trim();
+        if (SAFE_URL.test(trimmed)) {
+          return trimmed;
+        }
+        if (BARE_EMAIL.test(trimmed)) {
+          return `mailto:${trimmed}`;
+        }
+        if (/^www\./i.test(trimmed)) {
+          return `https://${trimmed}`;
+        }
+        return null;
+      }
+
+      function indentWidth(line) {
+        return /^[ \t]*/.exec(line)[0].replaceAll("\t", "    ").length;
+      }
+
+      function startsBlock(line) {
+        return (
+          MD_FENCE.test(line) ||
+          MD_HEADING.test(line) ||
+          MD_HR.test(line) ||
+          MD_QUOTE.test(line) ||
+          MD_UL.test(line) ||
+          MD_OL.test(line)
+        );
+      }
+
+      function isTableStart(lines, index) {
+        return (
+          lines[index].includes("|") &&
+          index + 1 < lines.length &&
+          lines[index + 1].includes("-") &&
+          MD_TABLE_DIVIDER.test(lines[index + 1])
+        );
+      }
+
+      function splitTableRow(line) {
+        return line
+          .trim()
+          .replace(/^\|/, "")
+          .replace(/\|$/, "")
+          .split("|")
+          .map((cell) => cell.trim());
+      }
+
+      /* ----- inline ----- */
+
+      // Code spans, links, images and bare URLs are pulled out into
+      // placeholders first so escaping and emphasis can't corrupt them.
+      function renderInline(text) {
+        const tokens = [];
+        const hold = (html) => `\u0000${tokens.push(html) - 1}\u0000`;
+
+        let working = String(text).replaceAll("\u0000", "");
+
+        working = working.replace(/(`+)([^`]|[^`][\s\S]*?)\1(?!`)/g, (_, __, code) =>
+          hold(`<code>${escapeHtml(code.replace(/^ | $/g, ""))}</code>`),
+        );
+
+        working = working.replace(
+          /!\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g,
+          (whole, alt, url) => {
+            const href = safeUrl(url);
+            return href
+              ? hold(
+                  `<img src="${escapeHtml(href)}" alt="${escapeHtml(alt)}" loading="lazy" />`,
+                )
+              : whole; // left for the global escape pass below
+          },
+        );
+
+        working = working.replace(
+          /\[([^\]]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/g,
+          (whole, label, url) => {
+            const href = safeUrl(url);
+            return href
+              ? hold(
+                  `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${renderInline(label)}</a>`,
+                )
+              : whole; // left for the global escape pass below
+          },
+        );
+
+        working = working.replace(
+          /(^|[\s(])((?:https?:\/\/|www\.)[^\s<>()]+[^\s<>().,;:!?'"])/g,
+          (whole, lead, url) => {
+            const href = safeUrl(url);
+            return href
+              ? `${lead}${hold(
+                  `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`,
+                )}`
+              : whole;
+          },
+        );
+
+        working = escapeHtml(working)
+          .replace(/\*\*\*([\s\S]+?)\*\*\*/g, "<strong><em>$1</em></strong>")
+          .replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>")
+          .replace(/__([\s\S]+?)__/g, "<strong>$1</strong>")
+          .replace(/~~([\s\S]+?)~~/g, "<del>$1</del>")
+          .replace(/(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?!\w)/g, "$1<em>$2</em>")
+          .replace(/(^|[^\w_])_(?!\s)([^_\n]+?)_(?!\w)/g, "$1<em>$2</em>");
+
+        return working.replace(/\u0000(\d+)\u0000/g, (_, index) => tokens[Number(index)]);
+      }
+
+      /* ----- blocks ----- */
+
+      function renderCodeBlock(code, language) {
+        const label = language ? escapeHtml(language) : "code";
+        return (
+          `<div class="md-code"><div class="md-code-head">` +
+          `<span class="md-code-lang">${label}</span>` +
+          `<button class="md-copy" type="button">Copy</button></div>` +
+          `<pre><code>${escapeHtml(code)}</code></pre></div>`
+        );
+      }
+
+      function renderTable(lines, start) {
+        const headers = splitTableRow(lines[start]);
+        const alignments = splitTableRow(lines[start + 1]).map((cell) => {
+          const left = cell.startsWith(":");
+          const right = cell.endsWith(":");
+          if (left && right) return "center";
+          if (right) return "right";
+          return left ? "left" : "";
+        });
+        const align = (index) =>
+          alignments[index] ? ` style="text-align:${alignments[index]}"` : "";
+
+        let index = start + 2;
+        const body = [];
+        while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+          body.push(splitTableRow(lines[index]));
+          index += 1;
+        }
+
+        const head = headers
+          .map((cell, position) => `<th${align(position)}>${renderInline(cell)}</th>`)
+          .join("");
+        const rows = body
+          .map(
+            (cells) =>
+              `<tr>${headers
+                .map(
+                  (_, position) =>
+                    `<td${align(position)}>${renderInline(cells[position] ?? "")}</td>`,
+                )
+                .join("")}</tr>`,
+          )
+          .join("");
+
+        return {
+          html:
+            `<div class="table-scroll md-table"><table><thead><tr>${head}</tr></thead>` +
+            `<tbody>${rows}</tbody></table></div>`,
+          next: index,
+        };
+      }
+
+      function renderList(lines, start) {
+        const first = MD_UL.exec(lines[start]) || MD_OL.exec(lines[start]);
+        const ordered = !MD_UL.test(lines[start]);
+        const baseIndent = indentWidth(lines[start]);
+        const stripWidth = baseIndent + first[2].length + 1;
+        const items = [];
+        let current = null;
+        let index = start;
+
+        while (index < lines.length) {
+          const line = lines[index];
+          const item = MD_UL.exec(line) || MD_OL.exec(line);
+          const isItem = Boolean(item);
+          const width = indentWidth(line);
+
+          if (isItem && width <= baseIndent) {
+            // A shallower marker, or a switch between bullets and numbers,
+            // belongs to a different list.
+            if (width < baseIndent || !MD_UL.test(line) !== ordered) {
+              break;
+            }
+            current = [item[3]];
+            items.push(current);
+            index += 1;
+            continue;
+          }
+
+          if (!line.trim()) {
+            const next = lines[index + 1];
+            const continues =
+              next !== undefined &&
+              next.trim() &&
+              (indentWidth(next) > baseIndent ||
+                ((MD_UL.test(next) || MD_OL.test(next)) &&
+                  indentWidth(next) === baseIndent));
+            if (!continues) {
+              break;
+            }
+            if (current) {
+              current.push("");
+            }
+            index += 1;
+            continue;
+          }
+
+          if (width > baseIndent && current) {
+            current.push(line.slice(Math.min(width, stripWidth)));
+            index += 1;
+            continue;
+          }
+
+          break;
+        }
+
+        const rendered = items
+          .map((itemLines) => {
+            const html = renderBlocks(itemLines);
+            // Tight items: unwrap the leading paragraph (so "text + nested list"
+            // items stay compact). Items with several paragraphs stay loose.
+            const lead = /^<p>([\s\S]*?)<\/p>([\s\S]*)$/.exec(html);
+            const tight = lead && !lead[2].includes("<p>");
+            return `<li>${tight ? lead[1] + lead[2] : html}</li>`;
+          })
+          .join("");
+        const tag = ordered ? "ol" : "ul";
+        const startAttr =
+          ordered && first[2] !== "1" ? ` start="${Number(first[2])}"` : "";
+
+        return { html: `<${tag}${startAttr}>${rendered}</${tag}>`, next: index };
+      }
+
+      function renderBlocks(lines) {
+        const out = [];
+        let index = 0;
+
+        while (index < lines.length) {
+          const line = lines[index];
+
+          if (!line.trim()) {
+            index += 1;
+            continue;
+          }
+
+          const fence = MD_FENCE.exec(line);
+          if (fence) {
+            const marker = fence[1][0];
+            const length = fence[1].length;
+            const body = [];
+            index += 1;
+            while (index < lines.length) {
+              const close = MD_FENCE_CLOSE.exec(lines[index]);
+              if (close && close[1][0] === marker && close[1].length >= length) {
+                break;
+              }
+              body.push(lines[index]);
+              index += 1;
+            }
+            index += 1;
+            out.push(renderCodeBlock(body.join("\n"), fence[2]));
+            continue;
+          }
+
+          if (MD_HR.test(line)) {
+            out.push("<hr />");
+            index += 1;
+            continue;
+          }
+
+          const heading = MD_HEADING.exec(line);
+          if (heading) {
+            const level = heading[1].length;
+            out.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
+            index += 1;
+            continue;
+          }
+
+          if (MD_QUOTE.test(line)) {
+            const body = [];
+            while (index < lines.length && MD_QUOTE.test(lines[index])) {
+              body.push(MD_QUOTE.exec(lines[index])[1]);
+              index += 1;
+            }
+            out.push(`<blockquote>${renderBlocks(body)}</blockquote>`);
+            continue;
+          }
+
+          if (MD_UL.test(line) || MD_OL.test(line)) {
+            const list = renderList(lines, index);
+            out.push(list.html);
+            index = list.next;
+            continue;
+          }
+
+          if (isTableStart(lines, index)) {
+            const table = renderTable(lines, index);
+            out.push(table.html);
+            index = table.next;
+            continue;
+          }
+
+          const paragraph = [];
+          while (
+            index < lines.length &&
+            lines[index].trim() &&
+            !startsBlock(lines[index]) &&
+            !isTableStart(lines, index)
+          ) {
+            paragraph.push(lines[index].trim());
+            index += 1;
+          }
+          if (paragraph.length) {
+            out.push(`<p>${renderInline(paragraph.join("\n")).replaceAll("\n", "<br />")}</p>`);
+          } else {
+            // Defensive: never spin if a line matched nothing above.
+            index += 1;
+          }
+        }
+
+        return out.join("");
+      }
+
+      function renderMarkdown(text) {
+        return renderBlocks(String(text ?? "").replaceAll("\r\n", "\n").split("\n"));
       }
 
       /* ---------- Message rendering ---------- */
@@ -447,6 +967,18 @@
         }
         bubble.textContent = text;
         return bubble;
+      }
+
+      // Agent prose is markdown; user input and error strings stay plain text.
+      function setMarkdown(bubble, text) {
+        bubble.classList.add("md");
+        bubble.innerHTML = renderMarkdown(text);
+        scrollToBottom();
+        return bubble;
+      }
+
+      function addAgentMarkdown(text) {
+        return setMarkdown(addBubble("agent"), text);
       }
 
       function addTyping() {
@@ -514,6 +1046,7 @@
 
       function renderFinishedRun(bubble, run) {
         bubble.replaceChildren();
+        bubble.classList.remove("md");
         if (run.status === "failed") {
           bubble.classList.add("error");
           bubble.textContent =
@@ -526,7 +1059,7 @@
             "Sorry — you don't have permission for that request.";
           return;
         }
-        bubble.textContent = summarizeRun(run);
+        setMarkdown(bubble, summarizeRun(run));
         renderRowsTable(bubble, run.result?.output?.rows);
       }
 
@@ -707,6 +1240,25 @@
 
       els.loginForm.addEventListener("submit", login);
       els.logoutBtn.addEventListener("click", () => showLogin());
+      els.newChatBtn.addEventListener("click", startNewChat);
+
+      // Copy buttons live inside markdown-generated HTML, so delegate.
+      els.messages.addEventListener("click", async (event) => {
+        const button = event.target.closest(".md-copy");
+        if (!button) {
+          return;
+        }
+        const code = button.closest(".md-code")?.querySelector("code");
+        try {
+          await navigator.clipboard.writeText(code ? code.textContent : "");
+          button.textContent = "Copied";
+        } catch (error) {
+          button.textContent = "Copy failed";
+        }
+        setTimeout(() => {
+          button.textContent = "Copy";
+        }, 1500);
+      });
       els.sendBtn.addEventListener("click", sendMessage);
       els.messageInput.addEventListener("input", autosize);
       els.messageInput.addEventListener("keydown", (event) => {
