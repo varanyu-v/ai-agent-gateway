@@ -107,6 +107,66 @@ Unchanged contract, now centralized in helpers:
   `x-allowed-permissions`. Internal services trust these headers, which is why
   only the gateway may be network-reachable from outside in a real deployment.
 
+### `GET /catalog`
+
+Policy as a read model, so a client can render what the signed-in user may
+use. Requires a token but has no Casbin gate of its own: it reports access
+rather than granting it.
+
+Each list is the union of two sources — the Casbin policy (what is governed)
+and the registry snapshot from `/internal/agents` and `/internal/mcp` (what is
+running) — so drift is visible instead of hidden. Running with no policy row
+gives `governed: false, allowed: false` (deny-by-default); a policy row with
+nothing running gives `registered: false`.
+
+```json
+{
+  "registryAvailable": true,
+  "agents": [
+    {
+      "id": "world-agent",
+      "name": "World Analyst Agent",
+      "allowed": true,
+      "governed": true,
+      "registered": true,
+      "policyObject": "agent:world-agent",
+      "policyAction": "invoke"
+    }
+  ],
+  "mcpServers": [
+    {
+      "id": "world-mcp",
+      "allowed": true,
+      "governed": true,
+      "registered": true,
+      "policyObject": "mcp:world-mcp",
+      "policyAction": "execute",
+      "tools": [{ "name": "list_top_cities", "description": "..." }]
+    }
+  ],
+  "dataSources": [
+    {
+      "id": "world-db",
+      "allowed": true,
+      "governed": true,
+      "policyObject": "datasource:world-db",
+      "policyAction": "read"
+    }
+  ]
+}
+```
+
+Two fields are access-scoped:
+
+- `tools`: only when the caller may `execute` that server. Authz has no
+  per-tool granularity below the server object.
+- `roles` (the subjects that *would* grant access): only for policy admins,
+  set by `POLICY_ADMIN_SUBJECTS` (default `role:data-admin`). Ordinary users
+  learn whether they have access, not who else does.
+
+If the orchestrator is unreachable the endpoint still returns `200` with
+`registryAvailable: false` and the policy-only view.
+
 ## Traffic governance
 
 **Rate limiting.** A token bucket per `tenant_id:user_id` guards

@@ -131,6 +131,20 @@ branding can never widen an agent's abilities. With no `ASSISTANT_*`
 variables set, all prompts keep the neutral default voice. Values are read
 once at service start; restart to apply changes.
 
+### Reply language
+
+`REPLY_LANGUAGE_RULE` is appended to both LLM prompts — the agent planner
+(`apps/agents/runtime.py`) and the router's general answer
+(`apps/orchestrator/router.py`) — so one rule governs every generated reply:
+answer in the language and script of the user's latest message.
+
+These prompts carry no conversation history, so the message being answered
+*is* the latest one; a user who switches language gets it from that turn
+onward, with no per-thread language state to store. The rule tells the model
+to follow the user over the prompt itself, since the English agent and tool
+descriptions would otherwise pull replies back toward English. Static fallback
+replies (no LLM configured) are fixed strings and are not translated.
+
 ## Agent service contract
 
 Any agent service must implement three endpoints. The two shipped agents get

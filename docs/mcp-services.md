@@ -61,7 +61,15 @@ caches the discovered tool list (`tools/list`). Failures are normalized like
 the agent registry: timeout → `504`, unreachable → `502`, server 5xx or an
 invalid/JSON-RPC-error response → `502`, invalid params (e.g. unknown tool) →
 `400`. `GET /internal/mcp` on the orchestrator lists the registered servers
-with their cards and discovered tools.
+with their cards and discovered tools. It re-runs discovery first (a no-op
+once every server is known), so a server that lost the startup race is listed
+with its tools instead of appearing empty.
+
+Two callers read that tool list, both filtered per user: the gateway's
+`GET /catalog` (which the chat UI's tools drawer renders), and the supervisor
+router, which passes the caller's permitted tools into its general-answer
+prompt so the assistant describes only what that caller can reach. Registering
+a server therefore updates both with no prompt or UI changes.
 
 `McpRegistry.call_tool(server, tool_name, arguments, headers)` invokes one
 tool and returns the MCP result (`content`, `structuredContent`, `isError`).

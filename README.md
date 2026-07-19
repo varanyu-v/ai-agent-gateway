@@ -69,9 +69,12 @@ docker compose logs -f gateway orchestrator world-agent procurement-agent mcp-wo
 - `apps/workers`: the MCP worker — the platform's only tool worker. It consumes `tool.requested` events (tool is always `mcp`), routes each call to the MCP server named in the decision using the `MCP_SERVICES` registry, and publishes `tool.completed` events. It holds no credentials; identity headers are forwarded so RLS still applies.
 - `apps/data_access`: per-agent database access layers built on a shared runtime (`apps/data_access/runtime.py`). Each plane holds credentials for only its own database and enforces the final read-only, table-allowlisted, tenant-scoped SQL guard. `apps/data_access/world` (`world-db-access`) and `apps/data_access/procurement` (`procurement-db-access`) are the two current planes.
 - `apps/mcp`: standalone MCP (Model Context Protocol) tool servers built on a shared runtime (`apps/mcp/runtime.py`). Each server exposes `/.well-known/mcp-card` for discovery and a JSON-RPC `/mcp` endpoint (`initialize`, `tools/list`, `tools/call`), holds no database credentials, and delegates reads to the owning data plane. Servers are declared in `MCP_SERVICES` and discovered by the orchestrator's `McpRegistry` (`GET /internal/mcp`), mirroring the agent registry. `apps/mcp/world`, `apps/mcp/procurement`, and `apps/mcp/report` (report generation as a queued job, no database access) are the three example servers. See `docs/mcp-services.md`.
+- `apps/persona.py`: the assistant persona (`ASSISTANT_*`) and reply-language rule applied to every user-facing answer. See `docs/agent-services.md`.
+- `apps/litellm_client.py`: shared LiteLLM caller used by the agent runtime and the supervisor router, with the Langfuse generation span per call.
+- `apps/langfuse_utils.py`: shared Langfuse tracer helpers, including the `x-langfuse-traceparent` propagation that keeps agent generations under the run root.
 - `apps/observability.py`: configures OpenTelemetry traces and metrics for the gateway, orchestrator, agent, worker, and data-plane steps.
 - `apps/frontend/index.html`: local browser test console with login, role visibility, example runs, tool response rendering, agent input/output, and human approval.
-- `apps/frontend/chat.html`: production-style chat UI (`/chat`). Hides all platform internals: every message is sent to the `assistant` router, tool results render as tables in the conversation, and approvals surface as an inline button.
+- `apps/frontend/chat.html`: production-style chat UI (`/chat`). Hides the routing internals: every message is sent to the `assistant` router, tool results render as tables in the conversation, and approvals surface as an inline button. A tools drawer lists what this user can do, from `GET /catalog`.
 - `docker/keycloak/ptvn-realm.json`: local realm, roles, client, and seeded demo users.
 - `docker/otel/collector-config.yaml`: local OTLP collector pipeline that forwards traces to Tempo and exposes metrics for Prometheus.
 - `docker/prometheus/prometheus.yml`: Prometheus scrape config for app metrics exported by the collector.
@@ -353,6 +356,22 @@ Gateway tunables (defaults shown in `.env.example`): `GATEWAY_RATE_LIMIT_ENABLED
 `GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS`, `GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS`,
 `GATEWAY_BREAKER_FAILURE_THRESHOLD`, `GATEWAY_BREAKER_RESET_SECONDS`,
 `GATEWAY_JWT_LEEWAY_SECONDS`.
+
+### Capability Catalog
+
+`GET /catalog` lists every agent, MCP server, and data source with a flag for
+whether the signed-in user may use it. It reports policy rather than enforcing
+it, so a UI can show a user what they can do without duplicating Casbin rules.
+
+```bash
+curl -sS http://localhost:8000/catalog -H "Authorization: Bearer $TOKEN"
+```
+
+An MCP server's `tools` are returned only to callers who may `execute` it, and
+the `roles` that would grant access only to policy admins
+(`POLICY_ADMIN_SUBJECTS`, default `role:data-admin`). The chat UI's tools
+drawer and the router's general-answer prompt both read from here. Response
+shape in `docs/gateway-design.md`.
 
 ## Observability Monitoring
 
@@ -640,6 +659,31 @@ For Docker Compose on macOS or Windows, use a host-reachable URL such as:
 ```bash
 LITELLM_BASE_URL=http://host.docker.internal:4000/v1
 ```
+
+Agent services and the supervisor router both call LiteLLM through the shared
+`apps/litellm_client.py`.
+
+## Assistant Persona
+
+Every user-facing answer speaks in one persona (`apps/persona.py`), configured
+for all services through the Compose `x-app-env` anchor:
+
+```bash
+ASSISTANT_NAME=Taokae Procurement Agent
+ASSISTANT_ROLE=the procurement assistant for this enterprise gateway
+ASSISTANT_GENDER=female
+ASSISTANT_TONE=warm, professional, and concise
+ASSISTANT_STYLE=
+ASSISTANT_PERSONA_PROMPT=
+ASSISTANT_WELCOME_MESSAGE=Hello! I'm Taokae Procurement Agent. Ask me anything about procurement, suppliers, or world data.
+```
+
+It carries voice only — capability rules stay hardcoded, so branding cannot
+widen an agent's access. `ASSISTANT_GENDER` picks the polite forms in gendered
+languages (Thai ครับ/ค่ะ); `ASSISTANT_PERSONA_PROMPT` replaces the generated
+block wholesale. Empty values keep the neutral default voice. Replies follow
+the language of the user's latest message. Values are read at service start;
+restart to apply. Full design in `docs/agent-services.md`.
 
 ## Local Development Without Compose
 
