@@ -193,6 +193,58 @@ def build_fallback_general_answer(persona: Persona) -> str:
     )
 
 
+def build_access_denied_answer(persona: Persona, agent_id: str) -> str:
+    """User-facing refusal when a message needs an agent the caller cannot use.
+
+    The reader is told the real reason — a permission boundary — instead of the
+    deflecting "here is what I can do instead" greeting they used to get from
+    whichever reachable agent absorbed the question. Only the voice comes from
+    the persona; like every other capability statement the wording is hardcoded,
+    so branding cannot soften the refusal into an implied "not supported yet".
+
+    The technical `denied_reason` recorded for audit stays separate from this.
+    """
+    domain = agent_id.removesuffix("-agent").replace("-", " ")
+    return (
+        f"{persona.introduction()}. Answering this needs the {domain} "
+        f"specialist, and your account is not permitted to use it, so I cannot "
+        "run it or its tools for you — this is an access limit, not missing "
+        "data. Ask your administrator to grant access if you need it."
+    )
+
+
+def _build_denied_answer(persona: Persona, needed: str) -> str:
+    """Shared refusal wording for a run stopped by an orchestrator policy check.
+
+    Reaches the reader after the agent was already allowed to plan, so it says
+    what the plan needed rather than naming the specialist.
+    """
+    return (
+        f"{persona.introduction()}. Answering this needs {needed}, and your "
+        "account is not permitted to use it, so I cannot run that step for "
+        "you — this is an access limit, not missing data. Ask your "
+        "administrator to grant access if you need it."
+    )
+
+
+def build_source_denied_answer(persona: Persona, permission: str) -> str:
+    """User-facing refusal when the caller cannot read a required data source.
+
+    The caller could invoke the agent, so the agent planned a real lookup and
+    only the source check stopped it. Without this the chat UI fell back to the
+    audit string ("User cannot use data source permission: procurement-db"),
+    which reads like an internal error rather than a permission boundary.
+    """
+    source = permission.removesuffix("-db").replace("-", " ")
+    return _build_denied_answer(persona, f"the {source} data source")
+
+
+def build_tool_denied_answer(persona: Persona, tool: str) -> str:
+    """User-facing refusal when the caller cannot execute a required tool."""
+    server = tool.removeprefix("mcp:").removesuffix("-mcp").replace("-", " ")
+    return _build_denied_answer(persona, f"the {server} tools")
+
+
 GENERAL_ANSWER_SYSTEM_PROMPT = build_general_answer_system_prompt(PERSONA)
 FALLBACK_GENERAL_ANSWER = build_fallback_general_answer(PERSONA)
 

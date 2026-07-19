@@ -1202,7 +1202,10 @@
           return;
         }
         if (run.status === "denied") {
+          // `output` explains the refusal in the assistant's voice; the raw
+          // `denied_reason` is the audit string and only a last resort here.
           bubble.textContent =
+            run.output ||
             run.denied_reason ||
             "Sorry — you don't have permission for that request.";
           return;

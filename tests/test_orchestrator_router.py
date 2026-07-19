@@ -436,6 +436,48 @@ class AssistantRunTests(RouterTestCase):
         self.assertEqual(route_events[0]["route"], "procurement-agent")
         self.assertEqual(route_events[0]["route_source"], "policy_filter")
 
+    async def test_planner_cannot_hide_a_denial_behind_a_reachable_agent(self) -> None:
+        """The planner only ever sees reachable agents, so a forbidden question
+        lands on the closest one it was offered — which then answers with its
+        own capability pitch and no denial. The deterministic domain match has
+        to outrank that, or the caller is told nothing about the real limit."""
+        invoked: list[str] = []
+
+        async def route_to_world(span, messages) -> str:
+            return '{"route":"world-agent","reason":"closest available"}'
+
+        async def fake_invoke(agent, state, thread_id, langfuse_span) -> dict:
+            invoked.append(agent.agent_id)
+            return {"action": "final", "output": "I specialize in world data."}
+
+        with (
+            patch.object(litellm_client, "complete", route_to_world),
+            patch.object(orchestrator, "invoke_agent_service", fake_invoke),
+        ):
+            async with orchestrator_client() as client:
+                response = await client.post(
+                    f"/internal/agents/{router.ROUTER_AGENT_ID}/runs",
+                    headers=RUN_HEADERS,
+                    json={"message": "rank suppliers by total purchase spend and risk"},
+                )
+
+        body = response.json()
+        self.assertEqual(body["status"], "denied")
+        self.assertEqual(invoked, [])
+        # Audit keeps the technical string; the caller reads the explanation.
+        self.assertIn("procurement-agent", body["denied_reason"])
+        self.assertEqual(
+            body["output"],
+            router.build_access_denied_answer(PERSONA, "procurement-agent"),
+        )
+
+        route_events = [
+            event
+            for event in self.published_events("audit.events")
+            if event["event"] == "assistant_route_selected"
+        ]
+        self.assertEqual(route_events[0]["route_source"], "policy_filter")
+
     async def test_routed_agent_requires_invoke_permission(self) -> None:
         async with orchestrator_client() as client:
             response = await client.post(
@@ -452,6 +494,57 @@ class AssistantRunTests(RouterTestCase):
 
         events = [event["event"] for event in self.published_events("audit.events")]
         self.assertIn("agent_access_denied", events)
+        self.assertEqual(self.published_events("tool.requested"), [])
+
+    async def test_source_denial_reaches_the_chat_in_the_assistant_voice(self) -> None:
+        """The `source-auditor` case: the caller may invoke the agent, so the
+        run gets all the way to a real plan and only the data-source check stops
+        it. A denied run is terminal, so the chat renders this POST response
+        without polling — `output` has to carry the explanation, or the reader
+        sees the raw audit string ("User cannot use data source permission:
+        procurement-db")."""
+
+        async def fake_invoke(agent, state, thread_id, langfuse_span) -> dict:
+            return {
+                "action": "tool",
+                "tool": "mcp",
+                "required_permission": "procurement-db",
+                "tool_input": {
+                    "server": "procurement-mcp",
+                    "name": "supplier_spend_summary",
+                    "arguments": {},
+                },
+            }
+
+        headers = {
+            **RUN_HEADERS,
+            "x-allowed-permissions": "world-db",
+            "x-policy-subjects": "role:source-auditor",
+        }
+        with patch.object(orchestrator, "invoke_agent_service", fake_invoke):
+            async with orchestrator_client() as client:
+                response = await client.post(
+                    f"/internal/agents/{router.ROUTER_AGENT_ID}/runs",
+                    headers=headers,
+                    json={"message": "rank suppliers by total purchase spend and risk"},
+                )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "denied")
+        # Audit keeps the technical string; the caller reads the explanation.
+        self.assertEqual(
+            body["denied_reason"],
+            "User cannot use data source permission: procurement-db",
+        )
+        self.assertEqual(
+            body["output"],
+            router.build_source_denied_answer(PERSONA, "procurement-db"),
+        )
+        self.assertNotIn("procurement-db", body["output"])
+
+        events = [event["event"] for event in self.published_events("audit.events")]
+        self.assertIn("permission_access_denied", events)
         self.assertEqual(self.published_events("tool.requested"), [])
 
     async def test_unknown_agent_still_returns_404(self) -> None:

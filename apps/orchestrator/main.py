@@ -69,10 +69,14 @@ from apps.orchestrator.router import (
     ROUTER_WORKFLOW,
     RouteDecision,
     answer_general,
+    build_access_denied_answer,
+    build_source_denied_answer,
+    build_tool_denied_answer,
     classify_route,
     fallback_route,
     is_router_agent,
 )
+from apps.persona import PERSONA
 
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
@@ -645,7 +649,14 @@ async def deny_permission_access(
                 "reason": denied_reason,
             },
         )
-    return {"needs_approval": False, "denied_reason": denied_reason}
+    # `denied_reason` stays the technical audit string; `denied_output` is what
+    # the caller reads, so a chat user gets the boundary explained in the
+    # assistant's voice instead of the raw policy sentence.
+    return {
+        "needs_approval": False,
+        "denied_reason": denied_reason,
+        "denied_output": build_source_denied_answer(PERSONA, permission),
+    }
 
 
 async def deny_tool_access(
@@ -678,7 +689,11 @@ async def deny_tool_access(
                 "reason": denied_reason,
             },
         )
-    return {"needs_approval": False, "denied_reason": denied_reason}
+    return {
+        "needs_approval": False,
+        "denied_reason": denied_reason,
+        "denied_output": build_tool_denied_answer(PERSONA, tool),
+    }
 
 
 async def invoke_agent_service(
@@ -992,12 +1007,20 @@ async def run(
                     span_child_context(langfuse_span),
                 )
 
-                if route.target == GENERAL_ROUTE and unreachable:
+                if unreachable:
                     # Withholding unreachable agents from the planner would
                     # also turn a probe for forbidden data into an ordinary
                     # general answer, losing the explicit denial and its audit
                     # record. Match those agents deterministically instead, so
                     # the refusal stays visible to the user and to audit.
+                    #
+                    # This runs whatever the planner picked, not just on the
+                    # general route: the planner only ever sees reachable
+                    # agents, so a forbidden question tends to land on the
+                    # closest one it was offered, which then answers with a
+                    # deflecting "here is what I can help with instead". A
+                    # deterministic domain match outranks that, so the caller
+                    # hears the real reason.
                     blocked = fallback_route(body.message, unreachable)
                     if blocked != GENERAL_ROUTE:
                         route = RouteDecision(target=blocked, source="policy_filter")
@@ -1073,10 +1096,10 @@ async def run(
                         langfuse_span,
                         state,
                         status="denied",
-                        output=run_output_for_status(
-                            "denied",
-                            denied_reason=denied_reason,
-                        ),
+                        # `denied_reason` stays the technical string for spans
+                        # and audit; the caller reads `output`, which explains
+                        # the permission boundary in the assistant's voice.
+                        output=build_access_denied_answer(PERSONA, route.target),
                         denied_reason=denied_reason,
                     )
 
@@ -1124,7 +1147,8 @@ async def run(
             output = (
                 final_output
                 if final_output is not None
-                else run_output_for_status(
+                else result.get("denied_output")
+                or run_output_for_status(
                     status,
                     denied_reason=denied_reason,
                 )
@@ -1172,11 +1196,15 @@ async def run(
             if status != "running":
                 discard_langfuse_run_trace(x_request_id)
 
+            # A denied run is terminal, so the caller renders this response
+            # without polling: `output` has to travel with it, exactly as the
+            # router path in `settle_router_run` already returns it.
             return {
                 "run_id": x_request_id,
                 "status": status,
                 "agent_id": state["agent_id"],
                 "denied_reason": denied_reason,
+                "output": output,
             }
 
 
@@ -1302,6 +1330,20 @@ def callback_state_from_run(run_record: dict[str, Any]) -> AgentState:
     }
 
 
+def record_callback_denial(run_id: str, span: Span, denial: dict[str, Any]) -> None:
+    """Remember a refused tool call without ending the run.
+
+    The run deliberately stays `running`: the agent may still recover — try
+    another tool, or answer from what it already has — so only it knows whether
+    a refusal was fatal. But when it does give up it reports a bare `failed`,
+    and the user is told to rephrase, which is useless advice for a permission
+    boundary. Keeping the denial here lets `complete_run` recognize that ending
+    and settle it as `denied` in the assistant's voice instead.
+    """
+    span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+    remember_run(run_id, {"last_denial": denial})
+
+
 @app.post("/internal/runs/{run_id}/tool-calls")
 async def request_tool_call(
     run_id: str,
@@ -1339,11 +1381,11 @@ async def request_tool_call(
                 workflow,
                 body.required_permission,
             )
-            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            record_callback_denial(run_id, span, denial)
             raise HTTPException(status_code=403, detail=denial["denied_reason"])
         if tool != MCP_TOOL:
             denial = await deny_tool_access(state, workflow, tool or "unknown")
-            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            record_callback_denial(run_id, span, denial)
             raise HTTPException(status_code=403, detail=denial["denied_reason"])
         server_id = str(tool_input.get("server") or "")
         if not server_id or not can_use_mcp_server(state, server_id):
@@ -1352,7 +1394,7 @@ async def request_tool_call(
                 workflow,
                 f"mcp:{server_id or 'unknown'}",
             )
-            span.set_status(Status(StatusCode.ERROR, denial["denied_reason"]))
+            record_callback_denial(run_id, span, denial)
             raise HTTPException(status_code=403, detail=denial["denied_reason"])
 
         sequence = int(run_record.get("tool_call_seq") or 0) + 1
@@ -1424,10 +1466,24 @@ async def complete_run(
 
         status = body.status if body.status in {"completed", "failed"} else "failed"
         output = body.output or run_output_for_status(status)
+        denied_reason = None
+
+        # An agent that gives up on a refused tool call reports `failed` with
+        # the 403 detail verbatim, so an exact match against the denial we
+        # issued identifies a run that policy — not a bug — ended. Matching on
+        # the text keeps a run that recovered and later failed for an unrelated
+        # reason reported as the failure it is.
+        denial = run_record.get("last_denial")
+        if status == "failed" and denial and output == denial["denied_reason"]:
+            status = "denied"
+            denied_reason = str(denial["denied_reason"])
+            output = str(denial.get("denied_output") or denied_reason)
+
         remember_run(
             run_id,
             {
                 "status": status,
+                "denied_reason": denied_reason,
                 "result": body.result,
                 "output": output,
             },
@@ -1443,9 +1499,9 @@ async def complete_run(
                 "event": f"agent_callback_run_{status}",
             },
         )
-        if status == "failed":
-            span.set_status(Status(StatusCode.ERROR, output))
-            discard_langfuse_run_trace(run_id, output)
+        if status in {"failed", "denied"}:
+            span.set_status(Status(StatusCode.ERROR, denied_reason or output))
+            discard_langfuse_run_trace(run_id, denied_reason or output)
         else:
             discard_langfuse_run_trace(run_id)
         return RUNS[run_id]

@@ -5,11 +5,15 @@ created, so the async path grants exactly the same access as the decision path.
 """
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 
+from apps.agents import runtime as agent_runtime
 from apps.orchestrator import main as orchestrator
+from apps.orchestrator import router
+from apps.persona import PERSONA
 
 
 RUN_ID = "run-broker-1"
@@ -310,6 +314,97 @@ class CompleteEndpointTests(ToolBrokerTestCase):
                 json={"status": "completed"},
             )
         self.assertEqual(response.status_code, 409)
+
+
+class AsyncRunDenialTests(ToolBrokerTestCase):
+    """How a refused tool call ends an async run, driven through the real agent
+    runtime so the 403 → `complete_run` handoff is exercised, not stubbed."""
+
+    def drive(self, run_async) -> None:
+        """Run the agent runtime's background driver against the orchestrator."""
+        real_client = agent_runtime.ToolBrokerClient
+
+        def broker_factory(agent_id: str, run_id: str) -> agent_runtime.ToolBrokerClient:
+            return real_client(
+                agent_id,
+                run_id,
+                base_url="http://orchestrator-under-test",
+                callback_token="",
+                poll_interval_seconds=0,
+                timeout_seconds=5,
+                transport=httpx.ASGITransport(app=orchestrator.app),
+            )
+
+        definition = SimpleNamespace(run_async=run_async)
+        request = agent_runtime.AgentRunRequest(
+            request_id=RUN_ID,
+            tenant_id="demo-tenant",
+            user_id="demo-user",
+            agent_id="world-agent",
+            message="prepare a world market brief",
+        )
+        return patch.object(agent_runtime, "ToolBrokerClient", broker_factory), (
+            definition,
+            request,
+        )
+
+    async def test_fatal_denial_settles_the_run_as_denied_not_failed(self) -> None:
+        """A permission boundary must not reach the user as a failed run: the
+        chat answers a failure with "try rephrasing", which cannot help someone
+        who simply lacks access."""
+        seed_callback_run(policy_subjects=["role:procurement-analyst"])
+
+        async def run_async(request, broker) -> str:
+            await broker.run_tool(
+                "mcp",
+                {"server": "world-mcp", "name": "list_top_cities"},
+                "world-db",
+            )
+            return "unreachable: the tool call is refused"
+
+        patcher, (definition, request) = self.drive(run_async)
+        with patcher:
+            await agent_runtime.drive_background_run(definition, request)
+
+        run = orchestrator.RUNS[RUN_ID]
+        self.assertEqual(run["status"], "denied")
+        # Audit keeps the technical string; the caller reads the explanation.
+        self.assertEqual(
+            run["denied_reason"],
+            "User cannot use data source permission: world-db",
+        )
+        self.assertEqual(
+            run["output"],
+            router.build_source_denied_answer(PERSONA, "world-db"),
+        )
+
+        events = [payload["event"] for _, payload in self.published]
+        self.assertIn("permission_access_denied", events)
+        self.assertIn("agent_callback_run_denied", events)
+
+    async def test_unrelated_failure_after_a_denial_is_still_a_failure(self) -> None:
+        """The agent recovered from the refusal and died of something else, so
+        reporting the run as `denied` would blame the wrong thing and send the
+        user to an administrator who cannot help."""
+        seed_callback_run(policy_subjects=["role:procurement-analyst"])
+
+        async def run_async(request, broker) -> str:
+            with self.assertRaises(agent_runtime.ToolBrokerError):
+                await broker.run_tool(
+                    "mcp",
+                    {"server": "world-mcp", "name": "list_top_cities"},
+                    "world-db",
+                )
+            raise RuntimeError("report renderer crashed")
+
+        patcher, (definition, request) = self.drive(run_async)
+        with patcher:
+            await agent_runtime.drive_background_run(definition, request)
+
+        run = orchestrator.RUNS[RUN_ID]
+        self.assertEqual(run["status"], "failed")
+        self.assertIsNone(run["denied_reason"])
+        self.assertEqual(run["output"], "report renderer crashed")
 
 
 if __name__ == "__main__":

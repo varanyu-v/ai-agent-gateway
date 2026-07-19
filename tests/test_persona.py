@@ -75,6 +75,20 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertTrue(text.startswith("I'm Taokae Procurement Agent"))
         self.assertIn("language model is not configured", text)
 
+    def test_access_denied_answer_names_the_permission_boundary(self) -> None:
+        text = router.build_access_denied_answer(BRANDED, "procurement-agent")
+        self.assertTrue(text.startswith("I'm Taokae Procurement Agent"))
+        # The reader must hear why the answer is missing, in these terms: a
+        # permission limit on a specialist that exists, not absent data.
+        self.assertIn("procurement specialist", text)
+        self.assertIn("not permitted", text)
+        self.assertIn("not missing data", text)
+
+    def test_access_denied_answer_stays_truthful_unbranded(self) -> None:
+        text = router.build_access_denied_answer(Persona(), "world-agent")
+        self.assertTrue(text.startswith(f"I'm {DEFAULT_ROLE}"))
+        self.assertIn("world specialist", text)
+
     def test_unbranded_planner_prompt_adds_no_persona(self) -> None:
         prompt = runtime.build_planner_system_prompt(Persona())
         self.assertEqual(
