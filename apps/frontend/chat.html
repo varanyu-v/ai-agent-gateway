@@ -452,6 +452,126 @@
         opacity: 0.5;
         cursor: default;
       }
+      /* ---------- Tools drawer ---------- */
+      .chat-header .btn-tools {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+        font-weight: 600;
+      }
+      /* Native <dialog>, docked full-height to the right edge as a drawer. */
+      .drawer {
+        width: min(440px, 100%);
+        max-width: 100vw;
+        height: 100vh;
+        max-height: 100vh;
+        margin: 0 0 0 auto;
+        padding: 0;
+        border: none;
+        background: var(--surface);
+        border-left: 1px solid var(--border);
+        color: var(--text);
+        flex-direction: column;
+        box-shadow: -8px 0 28px rgba(16, 24, 40, 0.22);
+      }
+      .drawer[open] {
+        display: flex;
+      }
+      .drawer::backdrop {
+        background: rgba(16, 24, 40, 0.45);
+      }
+      .drawer-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 18px 20px 4px;
+      }
+      .drawer-head h2 {
+        margin: 0;
+        font-size: 18px;
+      }
+      .drawer-close {
+        border: none;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 17px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 6px 8px;
+        border-radius: 8px;
+      }
+      .drawer-close:hover {
+        color: var(--text);
+      }
+      .drawer-sub {
+        margin: 0;
+        padding: 2px 20px 12px;
+        color: var(--text-muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      .drawer-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 4px 20px 24px;
+      }
+      .tools-note {
+        margin: 0 0 14px;
+        padding: 9px 11px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+      .tools-empty {
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+      .tool-group {
+        margin-bottom: 20px;
+      }
+      .tool-group-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 0 0 8px;
+      }
+      .tool-group-name {
+        font-weight: 650;
+        font-size: 14px;
+      }
+      .tool-group-count {
+        font-size: 12px;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .tool-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        background: var(--bg);
+      }
+      .tool-name {
+        font-family:
+          ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+        font-size: 13px;
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+      .tool-desc {
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--text-muted);
+        line-height: 1.45;
+      }
+      .tool-group-empty {
+        font-size: 13px;
+        color: var(--text-muted);
+        font-style: italic;
+      }
       [hidden] {
         display: none !important;
       }
@@ -481,6 +601,9 @@
       <span class="title" id="chatTitle">PTVN Assistant</span>
       <span class="who">
         <button id="newChatBtn" class="btn-new-chat" type="button">＋ New chat</button>
+        <button id="toolsBtn" class="btn-tools" type="button" title="See what I can do">
+          🛠 Tools
+        </button>
         <span id="whoAmI"></span>
         <button id="logoutBtn" type="button">Sign out</button>
       </span>
@@ -500,6 +623,21 @@
       </div>
     </footer>
 
+    <!-- Tools drawer: the MCP tools this signed-in user is allowed to use -->
+    <dialog class="drawer" id="toolsPanel" aria-labelledby="toolsHeading">
+      <div class="drawer-head">
+        <h2 id="toolsHeading">What I can do</h2>
+        <button class="drawer-close" id="toolsCloseBtn" type="button" aria-label="Close">
+          ✕
+        </button>
+      </div>
+      <p class="drawer-sub">
+        Tools you're allowed to use. I'll pick the right one for you
+        automatically when you ask.
+      </p>
+      <div class="drawer-body" id="toolsBody"></div>
+    </dialog>
+
     <script>
       "use strict";
 
@@ -514,6 +652,7 @@
 
       const state = {
         config: null,
+        catalog: null,
         token: "",
         username: "",
         threadId: "",
@@ -537,12 +676,21 @@
         whoAmI: document.getElementById("whoAmI"),
         logoutBtn: document.getElementById("logoutBtn"),
         newChatBtn: document.getElementById("newChatBtn"),
+        toolsBtn: document.getElementById("toolsBtn"),
+        toolsPanel: document.getElementById("toolsPanel"),
+        toolsCloseBtn: document.getElementById("toolsCloseBtn"),
+        toolsBody: document.getElementById("toolsBody"),
       };
 
       /* ---------- View state ---------- */
 
       function showLogin(errorMessage = "") {
         state.token = "";
+        // The tool catalog is per-user; drop it so the next sign-in refetches.
+        state.catalog = null;
+        if (els.toolsPanel.open) {
+          els.toolsPanel.close();
+        }
         els.loginView.hidden = false;
         els.chatHeader.hidden = true;
         els.messagesView.hidden = true;
@@ -1128,6 +1276,140 @@
         throw new Error("The request is taking too long. Please try again.");
       }
 
+      /* ---------- Tools catalog ----------
+         /catalog is authenticated and permission-filtered by the gateway:
+         each MCP server carries an `allowed` flag, and its `tools` array
+         (name + description) is only populated for servers this user may
+         execute. So the panel simply shows every allowed server's tools —
+         a plain-language view of what the assistant can do on the user's
+         behalf. */
+
+      async function loadCatalog() {
+        if (!state.catalog) {
+          state.catalog = await api("GET", "/catalog");
+        }
+        return state.catalog;
+      }
+
+      // "world-mcp" -> "World MCP". The catalog carries no display name for
+      // MCP servers, so make the id a little more legible.
+      function humanizeServer(id) {
+        return String(id)
+          .split(/[-_]+/)
+          .filter(Boolean)
+          .map((word) =>
+            word.toLowerCase() === "mcp"
+              ? "MCP"
+              : word.charAt(0).toUpperCase() + word.slice(1),
+          )
+          .join(" ");
+      }
+
+      function toolsMessage(text) {
+        const paragraph = document.createElement("p");
+        paragraph.className = "tools-empty";
+        paragraph.textContent = text;
+        return paragraph;
+      }
+
+      function renderToolGroup(server) {
+        const group = document.createElement("section");
+        group.className = "tool-group";
+
+        const tools = Array.isArray(server.tools) ? server.tools : [];
+        const head = document.createElement("div");
+        head.className = "tool-group-head";
+        const name = document.createElement("span");
+        name.className = "tool-group-name";
+        name.textContent = humanizeServer(server.id);
+        head.append(name);
+        if (tools.length) {
+          const count = document.createElement("span");
+          count.className = "tool-group-count";
+          count.textContent = `${tools.length} tool${tools.length === 1 ? "" : "s"}`;
+          head.append(count);
+        }
+        group.append(head);
+
+        if (!tools.length) {
+          const empty = document.createElement("div");
+          empty.className = "tool-group-empty";
+          empty.textContent = "No tools available right now.";
+          group.append(empty);
+          return group;
+        }
+
+        tools.forEach((tool) => {
+          const card = document.createElement("div");
+          card.className = "tool-card";
+          const toolName = document.createElement("div");
+          toolName.className = "tool-name";
+          toolName.textContent = tool.name || "(unnamed tool)";
+          card.append(toolName);
+          if (tool.description) {
+            const description = document.createElement("div");
+            description.className = "tool-desc";
+            description.textContent = tool.description;
+            card.append(description);
+          }
+          group.append(card);
+        });
+        return group;
+      }
+
+      function renderToolCatalog(catalog) {
+        els.toolsBody.replaceChildren();
+        const servers = (catalog.mcpServers || []).filter((server) => server.allowed);
+
+        if (!catalog.registryAvailable) {
+          const note = document.createElement("p");
+          note.className = "tools-note";
+          note.textContent =
+            "The tool registry is temporarily unreachable, so the live tool " +
+            "list may be incomplete.";
+          els.toolsBody.append(note);
+        }
+
+        if (!servers.length) {
+          els.toolsBody.append(
+            toolsMessage(
+              "You don't currently have permission to use any tools — but I " +
+                "can still answer general questions.",
+            ),
+          );
+          return;
+        }
+
+        servers.forEach((server) => {
+          els.toolsBody.append(renderToolGroup(server));
+        });
+      }
+
+      async function openTools() {
+        if (!els.toolsPanel.open) {
+          els.toolsPanel.showModal();
+        }
+        els.toolsBody.replaceChildren(toolsMessage("Loading tools…"));
+        try {
+          renderToolCatalog(await loadCatalog());
+        } catch (error) {
+          if (error instanceof AuthError) {
+            els.toolsPanel.close();
+            showLogin(error.message);
+            return;
+          }
+          els.toolsBody.replaceChildren(
+            toolsMessage(`Couldn't load tools: ${error.message}`),
+          );
+        }
+      }
+
+      function closeTools() {
+        if (els.toolsPanel.open) {
+          els.toolsPanel.close();
+        }
+      }
+
       /* ---------- Chat flow ---------- */
 
       async function sendMessage() {
@@ -1241,6 +1523,15 @@
       els.loginForm.addEventListener("submit", login);
       els.logoutBtn.addEventListener("click", () => showLogin());
       els.newChatBtn.addEventListener("click", startNewChat);
+      els.toolsBtn.addEventListener("click", openTools);
+      els.toolsCloseBtn.addEventListener("click", closeTools);
+      // A click landing on the dialog element itself is a click on its
+      // backdrop (Esc is handled natively by <dialog>).
+      els.toolsPanel.addEventListener("click", (event) => {
+        if (event.target === els.toolsPanel) {
+          closeTools();
+        }
+      });
 
       // Copy buttons live inside markdown-generated HTML, so delegate.
       els.messages.addEventListener("click", async (event) => {

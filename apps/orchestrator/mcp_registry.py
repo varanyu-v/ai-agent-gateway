@@ -13,6 +13,7 @@ stack: the discovery card, a JSON-RPC 2.0 `POST /mcp` endpoint supporting
 examples are built from `create_mcp_app()` in `apps/mcp/runtime.py`.
 """
 
+import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from itertools import count
@@ -136,6 +137,31 @@ class McpRegistry:
         if not isinstance(tools, list):
             raise ValueError("MCP server returned no tool list")
         server.tools = [tool for tool in tools if isinstance(tool, dict)]
+
+    async def ensure_discovered(self) -> None:
+        """Re-attempt discovery for servers that never came up at startup.
+
+        `start()` discovers every server best-effort and silently skips any
+        that weren't reachable yet, leaving them with an empty card and no
+        tools. `call_tool` already re-discovers such a server on first use;
+        this does the same for the read path (catalog / tools listing), so the
+        advertised tool list self-heals once a late-starting server is up
+        instead of staying empty until something calls it. Servers that are
+        genuinely down stay empty. Undiscovered servers are probed
+        concurrently so one slow server can't serialize the rest.
+        """
+        if self._client is None:
+            # Registry not started (e.g. under unit tests); nothing to probe.
+            return
+        pending = [server for server in self._servers.values() if not server.card]
+        if not pending:
+            return
+
+        async def _try(server: RegisteredMcpServer) -> None:
+            with suppress(httpx.HTTPError, ValueError, McpServiceError):
+                await self.discover(server)
+
+        await asyncio.gather(*(_try(server) for server in pending))
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Flattened discovered tools across all registered servers."""

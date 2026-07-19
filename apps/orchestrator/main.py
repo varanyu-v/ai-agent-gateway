@@ -587,6 +587,34 @@ def can_use_mcp_server(state: AgentState, server_id: str) -> bool:
     )
 
 
+async def permitted_mcp_tools(
+    subjects: list[str],
+    tenant_id: str,
+) -> list[dict[str, Any]]:
+    """Tools on the MCP servers this caller may execute, flattened for the
+    supervisor's general-answer prompt so the assistant can tell the user what
+    it can do. Discovery is refreshed first (a no-op once servers are known) so
+    a server that lost the startup race still contributes its tools, and access
+    is checked per server, so a tool the caller cannot reach never enters the
+    prompt.
+    """
+    await mcp_registry.ensure_discovered()
+    tools: list[dict[str, Any]] = []
+    for server_id in mcp_registry.server_ids:
+        if not can_execute_mcp_server(subjects, tenant_id, server_id):
+            continue
+        server = mcp_registry.get(server_id)
+        if server is None:
+            continue
+        for tool in server.tools:
+            name = str(tool.get("name") or "").strip()
+            if name:
+                tools.append(
+                    {"name": name, "description": str(tool.get("description") or "")},
+                )
+    return tools
+
+
 async def deny_permission_access(
     state: AgentState,
     workflow: str,
@@ -997,6 +1025,10 @@ async def run(
                         body.message,
                         span_child_context(langfuse_span),
                         candidates,
+                        await permitted_mcp_tools(
+                            state["policy_subjects"],
+                            x_tenant_id,
+                        ),
                     )
                     await publish(
                         "audit.events",
@@ -1172,6 +1204,9 @@ async def list_agents() -> dict[str, Any]:
 
 @app.get("/internal/mcp", include_in_schema=False)
 async def list_mcp_servers() -> dict[str, Any]:
+    # Self-heal servers that lost the startup discovery race, so the catalog
+    # advertises their tools instead of showing them as empty.
+    await mcp_registry.ensure_discovered()
     return {
         "servers": [
             {

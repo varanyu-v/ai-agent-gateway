@@ -460,6 +460,60 @@ class McpRegistryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await registry.aclose()
 
+    async def test_ensure_discovered_recovers_servers_that_failed_at_startup(
+        self,
+    ) -> None:
+        healthy = False
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not healthy:
+                # Server was not up when the orchestrator started.
+                return httpx.Response(503)
+            if request.url.path == "/.well-known/mcp-card":
+                return httpx.Response(
+                    200,
+                    json={"id": "world-mcp", "name": "World MCP Service"},
+                )
+            body = json.loads(request.content.decode())
+            if body["method"] == "initialize":
+                result: dict = {"protocolVersion": "2025-06-18"}
+            elif body["method"] == "tools/list":
+                result = {"tools": [{"name": "list_top_cities"}]}
+            else:
+                result = {}
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": body["id"], "result": result},
+            )
+
+        registry = McpRegistry("world-mcp=http://world-mcp:8010")
+        await registry.start(transport=httpx.MockTransport(handler))
+        try:
+            server = registry.get("world-mcp")
+            # Startup discovery failed: no card, no tools advertised yet.
+            self.assertEqual(server.card, {})
+            self.assertEqual(server.tools, [])
+
+            healthy = True
+            await registry.ensure_discovered()
+
+            self.assertEqual(server.name, "World MCP Service")
+            self.assertEqual(
+                [tool["name"] for tool in server.tools],
+                ["list_top_cities"],
+            )
+
+            # Now that the card is populated, a later call is a no-op: flip the
+            # backend unhealthy again and confirm the good state is retained.
+            healthy = False
+            await registry.ensure_discovered()
+            self.assertEqual(
+                [tool["name"] for tool in server.tools],
+                ["list_top_cities"],
+            )
+        finally:
+            await registry.aclose()
+
     async def test_registry_normalizes_server_failures(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/.well-known/mcp-card":

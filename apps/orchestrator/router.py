@@ -18,7 +18,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 from opentelemetry.context import Context
 
@@ -98,8 +98,19 @@ This user may not reach any specialist agent. Answer general questions only,
 and do not name or describe any specialist, database, or tool.
 """.strip()
 
-# Agent cards are fetched over HTTP from each agent service, so their
-# descriptions are untrusted input to every prompt they land in.
+# Tools the caller's specialists can run for them, listed so the assistant can
+# answer "what can you do / list the tools" accurately. Like the agent list, it
+# names abilities reachable through specialists — not powers this general mode
+# has — and only tools the caller may already use are ever passed in, so the
+# model cannot disclose a tool the user has no access to.
+TOOL_CAPABILITY_RULES = """
+Tools the specialists above can run for this user, so you may list them when the
+user asks what you can do or which tools exist (you cannot run them yourself in
+this mode, and you must not mention any tool absent from this list):
+""".strip()
+
+# Agent cards and MCP tool metadata are fetched over HTTP from each service, so
+# their descriptions are untrusted input to every prompt they land in.
 DESCRIPTION_MAX_LENGTH = 200
 
 
@@ -123,13 +134,49 @@ def capability_rules(agents: Iterable[RegisteredAgent]) -> str:
     return "\n".join([CAPABILITY_RULES, *lines])
 
 
+def _tool_summary(tool: dict[str, Any]) -> str:
+    """One capped, single-line summary of a tool from untrusted MCP metadata,
+    so a description carrying newlines or its own "Rules:" section cannot
+    restructure the prompt it lands in — same treatment as an agent card."""
+    raw = str(tool.get("description") or tool.get("name") or "")
+    summary = " ".join(raw.split())
+    if len(summary) > DESCRIPTION_MAX_LENGTH:
+        summary = f"{summary[:DESCRIPTION_MAX_LENGTH].rstrip()}..."
+    return summary
+
+
+def tool_capability_rules(tools: Iterable[dict[str, Any]]) -> str:
+    """Prompt block naming the caller's permitted tools, or "" when there are
+    none (callers omit the block entirely rather than emit an empty list)."""
+    lines = []
+    for tool in tools:
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        lines.append(f"- {name}: {_tool_summary(tool)}")
+    if not lines:
+        return ""
+    return "\n".join([TOOL_CAPABILITY_RULES, *lines])
+
+
 def build_general_answer_system_prompt(
     persona: Persona,
     agents: Iterable[RegisteredAgent] = (),
+    tools: Iterable[dict[str, Any]] = (),
 ) -> str:
-    return "\n\n".join(
-        (persona.preamble(), GENERAL_ANSWER_RULES, capability_rules(agents)),
-    )
+    agents = list(agents)
+    tool_block = tool_capability_rules(tools)
+    blocks = [persona.preamble(), GENERAL_ANSWER_RULES]
+    if agents:
+        blocks.append(capability_rules(agents))
+    elif not tool_block:
+        # No specialists and no tools: keep the explicit "name nothing" guard.
+        blocks.append(NO_CAPABILITY_RULES)
+    # else: no reachable agents but the caller has tools — the tool block is the
+    # only capability list and carries its own "mention nothing else" guard.
+    if tool_block:
+        blocks.append(tool_block)
+    return "\n\n".join(blocks)
 
 
 def build_fallback_general_answer(persona: Persona) -> str:
@@ -255,14 +302,15 @@ async def answer_general(
     message: str,
     langfuse_parent: Context | None = None,
     agents: Iterable[RegisteredAgent] = (),
+    tools: Iterable[dict[str, Any]] = (),
 ) -> GeneralAnswer:
     """Answer a general (non-domain) question with the LLM, or a static fallback.
 
-    `agents` must already be filtered to what the caller may invoke — it is
-    interpolated into the prompt, and the model treats everything in its
-    context as fair game to repeat.
+    `agents` and `tools` must already be filtered to what the caller may reach —
+    both are interpolated into the prompt, and the model treats everything in
+    its context as fair game to repeat.
     """
-    system_prompt = build_general_answer_system_prompt(PERSONA, agents)
+    system_prompt = build_general_answer_system_prompt(PERSONA, agents, tools)
     with _generation_span("assistant.answer", "answer", message, langfuse_parent) as span:
         content = await litellm_client.complete(
             span,
