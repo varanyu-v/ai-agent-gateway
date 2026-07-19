@@ -25,7 +25,7 @@ from opentelemetry.context import Context
 from apps import litellm_client
 from apps.observability import setup_langfuse_observability
 from apps.orchestrator.agent_registry import RegisteredAgent
-from apps.persona import PERSONA, Persona
+from apps.persona import PERSONA, REPLY_LANGUAGE_RULE, Persona
 
 
 ROUTER_AGENT_ID = os.getenv("ROUTER_AGENT_ID", "assistant")
@@ -176,6 +176,9 @@ def build_general_answer_system_prompt(
     # only capability list and carries its own "mention nothing else" guard.
     if tool_block:
         blocks.append(tool_block)
+    # Last block: the capability lists above are always English, and the rule
+    # has to outrank them when the user writes in another language.
+    blocks.append(REPLY_LANGUAGE_RULE)
     return "\n\n".join(blocks)
 
 

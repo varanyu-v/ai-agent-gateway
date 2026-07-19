@@ -54,7 +54,7 @@ from apps.observability import (
     setup_langfuse_observability,
     setup_observability,
 )
-from apps.persona import PERSONA, Persona
+from apps.persona import PERSONA, REPLY_LANGUAGE_RULE, Persona
 
 
 AGENT_PROTOCOL = "ptvn.agent/v1"
@@ -96,10 +96,14 @@ Rules:
 
 
 def build_planner_system_prompt(persona: Persona) -> str:
-    """Planner rules plus the gateway persona for the "reply" text; the
-    persona block is omitted entirely when nothing is configured."""
+    """Planner rules, the gateway persona, and the language rule for the
+    "reply" text; the persona block is omitted entirely when nothing is
+    configured. Only "reply" reaches the user, so the language rule scopes to
+    it — "action", "reason", and "arguments" stay machine-readable English."""
     return "\n\n".join(
-        part for part in (LLM_PLANNER_RULES, persona.reply_rules()) if part
+        part
+        for part in (LLM_PLANNER_RULES, persona.reply_rules(), REPLY_LANGUAGE_RULE)
+        if part
     )
 
 

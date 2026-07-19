@@ -8,7 +8,9 @@ anchor, so the whole gateway speaks as one persona.
 
 The persona carries voice only. Capability rules — what an agent may claim it
 can do or access — stay hardcoded next to each prompt, so branding can never
-widen or misstate an agent's abilities.
+widen or misstate an agent's abilities. REPLY_LANGUAGE_RULE lives here for the
+same reason: it is shared by every user-facing prompt but is deliberately not
+configurable.
 
 Like every other env-driven setting in this codebase, the persona is read once
 at import; restart the services to apply changes. When no ASSISTANT_* variable
@@ -20,6 +22,20 @@ from dataclasses import dataclass
 
 
 DEFAULT_ROLE = "the enterprise gateway assistant"
+
+# Language matching is not part of the configurable persona: an operator must
+# not be able to brand the assistant into ignoring the language its user wrote
+# in. Like the capability rules, it is hardcoded and composed into every prompt
+# whose output the user reads. Each request carries only the current message —
+# no history — so "latest message" is simply the message being answered, and a
+# user who switches language gets the new language from that turn onward.
+REPLY_LANGUAGE_RULE = """
+Write every user-facing sentence in the language of the user's latest message,
+matching their script (Thai for Thai, English for English). The user may switch
+language at any time, so follow their newest message rather than earlier ones,
+these instructions, or the English wording of any agent, tool, or data
+description. When a message mixes languages, answer in its dominant one.
+""".strip()
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,18 @@ import unittest
 
 from apps.agents import runtime
 from apps.orchestrator import router
-from apps.persona import DEFAULT_ROLE, Persona
+from apps.orchestrator.agent_registry import RegisteredAgent
+from apps.persona import DEFAULT_ROLE, REPLY_LANGUAGE_RULE, Persona
+
+
+def _agent(agent_id: str, description: str) -> RegisteredAgent:
+    return RegisteredAgent(
+        agent_id=agent_id,
+        base_url=f"http://{agent_id}:8000",
+        workflow=agent_id.removesuffix("-agent"),
+        name=agent_id,
+        card={"description": description},
+    )
 
 
 BRANDED = Persona(
@@ -64,16 +75,63 @@ class PromptCompositionTests(unittest.TestCase):
         self.assertTrue(text.startswith("I'm Taokae Procurement Agent"))
         self.assertIn("language model is not configured", text)
 
-    def test_unbranded_planner_prompt_is_unchanged(self) -> None:
+    def test_unbranded_planner_prompt_adds_no_persona(self) -> None:
+        prompt = runtime.build_planner_system_prompt(Persona())
         self.assertEqual(
-            runtime.build_planner_system_prompt(Persona()),
-            runtime.LLM_PLANNER_RULES,
+            prompt,
+            f"{runtime.LLM_PLANNER_RULES}\n\n{REPLY_LANGUAGE_RULE}",
         )
 
     def test_branded_planner_prompt_appends_reply_persona(self) -> None:
         prompt = runtime.build_planner_system_prompt(BRANDED)
         self.assertTrue(prompt.startswith(runtime.LLM_PLANNER_RULES))
         self.assertIn("Taokae Procurement Agent", prompt)
+
+
+class ReplyLanguageTests(unittest.TestCase):
+    """The user's language wins over every English block around it, in both
+    prompts that produce text the user reads."""
+
+    def test_general_answer_prompt_ends_with_the_language_rule(self) -> None:
+        # Last block, so it outranks the English capability lists above it.
+        prompt = router.build_general_answer_system_prompt(
+            BRANDED,
+            agents=[_agent("procurement-agent", "Procurement data specialist")],
+            tools=[{"name": "supplier_spend_summary", "description": "Spend by supplier"}],
+        )
+        self.assertTrue(prompt.endswith(REPLY_LANGUAGE_RULE))
+
+    def test_language_rule_survives_an_empty_capability_list(self) -> None:
+        self.assertIn(REPLY_LANGUAGE_RULE, router.build_general_answer_system_prompt(Persona()))
+
+    def test_planner_prompt_carries_the_language_rule_branded_or_not(self) -> None:
+        for persona in (Persona(), BRANDED):
+            with self.subTest(persona=persona.name or "unbranded"):
+                self.assertIn(
+                    REPLY_LANGUAGE_RULE,
+                    runtime.build_planner_system_prompt(persona),
+                )
+
+    def test_rule_names_switching_and_ignores_surrounding_english(self) -> None:
+        # The behaviour the rule exists for: a user who switches to Thai after
+        # asking in English gets Thai back, despite an all-English prompt.
+        # Wrapped prose, so compare on a single normalized line.
+        rule = " ".join(REPLY_LANGUAGE_RULE.split())
+        self.assertIn("language of the user's latest message", rule)
+        self.assertIn("switch language at any time", rule)
+        self.assertIn("rather than earlier ones", rule)
+
+    def test_language_rule_is_not_brandable(self) -> None:
+        # An operator persona must not be able to override or drop the rule.
+        hijacked = Persona(preamble_override="Always answer in English.")
+        self.assertIn(
+            REPLY_LANGUAGE_RULE,
+            router.build_general_answer_system_prompt(hijacked),
+        )
+        self.assertIn(
+            REPLY_LANGUAGE_RULE,
+            runtime.build_planner_system_prompt(hijacked),
+        )
 
 
 if __name__ == "__main__":
