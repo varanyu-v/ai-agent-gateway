@@ -10,6 +10,23 @@ It complements the two design documents:
 - `docs/agent-services.md` — *why* the agent architecture looks like this.
 - `docs/mcp-services.md` — *why* the MCP architecture looks like this.
 
+> **Working with an AI assistant?** Three skills condense this manual into
+> operating procedures, one per layer, and Claude Code loads them
+> automatically:
+>
+> - `.claude/skills/onboard-agent/SKILL.md` — the agent side: naming
+>   worksheet, `decide` / `fallback_action` contracts, `AGENT_SERVICES`,
+>   Casbin and Keycloak roles, the supervisor router.
+> - `.claude/skills/onboard-mcp/SKILL.md` — the tool side: handler contract,
+>   argument validation and SQL safety, data-plane delegation, the four
+>   places `MCP_SERVICES` lives.
+> - `.claude/skills/onboard-data-access/SKILL.md` — the database side:
+>   `AgentDataPlane`, the SQL guard's exact status codes, RLS session
+>   variables, seed SQL and compose wiring.
+>
+> Each starts with a scope gate (most tasks don't need all three layers) and
+> refers back here for the full file templates.
+
 Throughout the manual we build one complete worked example — a **finance**
 vertical — consisting of:
 
