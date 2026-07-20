@@ -95,6 +95,19 @@
         gap: 8px;
       }
 
+      .topbar-actions {
+        display: grid;
+        justify-items: end;
+        gap: 8px;
+      }
+
+      .monitor-links {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
       .pill {
         display: inline-flex;
         align-items: center;
@@ -280,6 +293,7 @@
         background: var(--primary);
         color: #fff;
         font-weight: 700;
+        text-decoration: none;
       }
 
       .btn:hover {
@@ -299,6 +313,12 @@
       .btn:disabled {
         cursor: not-allowed;
         opacity: 0.55;
+      }
+
+      .monitor-link {
+        min-height: 32px;
+        padding: 6px 10px;
+        font-size: 12px;
       }
 
       .sample-grid {
@@ -655,6 +675,15 @@
           padding: 16px;
         }
 
+        .topbar-actions {
+          justify-items: start;
+        }
+
+        .monitor-links,
+        .status-row {
+          justify-content: flex-start;
+        }
+
         main {
           padding: 16px;
         }
@@ -694,10 +723,50 @@
           </div>
         </div>
       </div>
-      <div class="status-row">
-        <span class="pill" id="configStatus">Config loading</span>
-        <span class="pill" id="tokenStatus">Not logged in</span>
-        <span class="pill" id="activeUser">No user</span>
+      <div class="topbar-actions">
+        <div class="monitor-links" aria-label="Monitoring tools">
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="grafana"
+            href="http://localhost:3000"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Grafana
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="prometheus"
+            href="http://localhost:9090"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Prometheus
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="loki"
+            href="http://localhost:3000"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Loki
+          </a>
+          <a
+            class="btn secondary monitor-link"
+            data-monitor-id="tempo"
+            href="http://localhost:3200"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Tempo
+          </a>
+        </div>
+        <div class="status-row">
+          <span class="pill" id="configStatus">Config loading</span>
+          <span class="pill" id="tokenStatus">Not logged in</span>
+          <span class="pill" id="activeUser">No user</span>
+        </div>
       </div>
     </header>
 
@@ -720,8 +789,8 @@
           <span>Carry requested and completed tool events.</span>
         </div>
         <div class="flow-step">
-          <strong>5. Workers</strong>
-          <span>Run SQL or report work against the sample services.</span>
+          <strong>5. MCP worker</strong>
+          <span>Routes tool calls to the MCP services behind the data planes.</span>
         </div>
       </section>
 
@@ -740,7 +809,7 @@
                 <li>Select a seeded user and press <span class="inline-code">Login</span>.</li>
                 <li>Pick an agent and sample message.</li>
                 <li>Press <span class="inline-code">Run agent</span> and inspect the JSON response.</li>
-                <li>Watch worker activity with <code>docker compose logs -f orchestrator sql-worker report-worker db-access</code>.</li>
+                <li>Watch worker activity with <code>docker compose logs -f orchestrator mcp-worker world-mcp procurement-mcp report-mcp</code>.</li>
               </ol>
             </div>
           </section>
@@ -763,11 +832,11 @@
                 <tbody>
                   <tr>
                     <td>world-analyst</td>
-                    <td>World DB SQL and report succeed; procurement access is blocked.</td>
+                    <td>World DB lookups and reports succeed; procurement access is blocked.</td>
                   </tr>
                   <tr>
                     <td>procurement-analyst</td>
-                    <td>Procurement DB SQL succeeds; World DB is denied.</td>
+                    <td>Procurement DB lookups succeed; World DB and reports are denied.</td>
                   </tr>
                   <tr>
                     <td>source-auditor</td>
@@ -809,6 +878,7 @@
                 <div>
                   <label for="agentId">Agent</label>
                   <select id="agentId">
+                    <option value="assistant">assistant (auto-route)</option>
                     <option value="world-agent">world-agent</option>
                     <option value="procurement-agent">procurement-agent</option>
                   </select>
@@ -897,7 +967,7 @@
               </div>
               <div class="sql-output" id="sqlOutput" hidden>
                 <div class="sql-output-header">
-                  <span>SQL response</span>
+                  <span>Tool response</span>
                   <span class="pill" id="sqlStatus">Waiting</span>
                 </div>
                 <div class="sql-output-body" id="sqlOutputBody"></div>
@@ -916,42 +986,33 @@
           label: "World analyst",
           username: "world-analyst",
           password: "world-password",
-          agent: "world-agent",
+          agent: "assistant",
           message: "show the largest cities by population with country context",
-          roles: ["agent:world-agent:invoke", "permission:world-db:read"],
+          roles: ["role:world-analyst"],
         },
         {
           label: "Procurement analyst",
           username: "procurement-analyst",
           password: "procurement-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "rank suppliers by total purchase spend and risk",
-          roles: ["agent:procurement-agent:invoke", "permission:procurement-db:read"],
+          roles: ["role:procurement-analyst"],
         },
         {
           label: "Source auditor",
           username: "source-auditor",
           password: "auditor-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "rank suppliers by total purchase spend and risk",
-          roles: [
-            "agent:world-agent:invoke",
-            "agent:procurement-agent:invoke",
-            "permission:world-db:read",
-          ],
+          roles: ["role:source-auditor"],
         },
         {
           label: "Data admin",
           username: "data-admin",
           password: "data-admin-password",
-          agent: "procurement-agent",
+          agent: "assistant",
           message: "remove blocked supplier records from the procurement source",
-          roles: [
-            "agent:world-agent:invoke",
-            "agent:procurement-agent:invoke",
-            "permission:world-db:read",
-            "permission:procurement-db:read",
-          ],
+          roles: ["role:data-admin"],
         },
       ];
 
@@ -962,8 +1023,8 @@
           user: "world-analyst",
           message: "show the largest cities by population with country context",
           description:
-            "Queries the World DB source and returns city, country, continent, district, and population rows.",
-          tool: "sql",
+            "Queries the World DB source through world-mcp and returns city, country, continent, district, and population rows.",
+          tool: "world-mcp",
           expected: "World DB rows",
           requiredPermission: "world-db",
         },
@@ -973,9 +1034,9 @@
           user: "world-analyst",
           message: "generate a world market entry report",
           description:
-            "Exercises the report worker through the World DB permission path without granting procurement access.",
-          tool: "report",
-          expected: "Report ready",
+            "Exercises the report MCP service through the World DB permission path without granting procurement access.",
+          tool: "report-mcp",
+          expected: "Report queued",
           requiredPermission: "world-db",
         },
         {
@@ -984,8 +1045,8 @@
           user: "procurement-analyst",
           message: "rank suppliers by total purchase spend and risk",
           description:
-            "Queries the second procurement database and ranks suppliers by spend, order count, and risk level.",
-          tool: "sql",
+            "Queries the second procurement database through procurement-mcp and ranks suppliers by spend, order count, and risk level.",
+          tool: "procurement-mcp",
           expected: "Supplier spend rows",
           requiredPermission: "procurement-db",
         },
@@ -996,7 +1057,7 @@
           message: "rank suppliers by total purchase spend and risk",
           description:
             "Proves agent access and database permission are separate by calling procurement without procurement-db read.",
-          tool: "sql",
+          tool: "procurement-mcp",
           expected: "Permission denied",
           allowedExpected: "Supplier spend rows",
           deniedExpected: "Permission denied",
@@ -1018,8 +1079,10 @@
 
       const state = {
         config: null,
+        catalog: null,
         token: "",
         claims: null,
+        permissions: null,
         pollTimer: null,
         currentInput: "",
         currentRunId: "",
@@ -1031,6 +1094,7 @@
         configStatus: document.querySelector("#configStatus"),
         tokenStatus: document.querySelector("#tokenStatus"),
         activeUser: document.querySelector("#activeUser"),
+        monitorLinks: document.querySelectorAll("[data-monitor-id]"),
         userPreset: document.querySelector("#userPreset"),
         username: document.querySelector("#username"),
         password: document.querySelector("#password"),
@@ -1092,8 +1156,30 @@
           aud: state.claims.aud,
           tenant_id: state.claims.tenant_id,
           roles: state.claims.realm_access?.roles || [],
+          gateway_policy: state.permissions
+            ? {
+                policy_subjects: state.permissions.policySubjects || [],
+                allowed_agents: state.permissions.allowedAgents || [],
+                allowed_data_sources: state.permissions.allowedDataSources || [],
+                allowed_tools: state.permissions.allowedTools || [],
+              }
+            : "Gateway permissions are loading.",
         };
         els.claimsOutput.textContent = pretty(view);
+      }
+
+      function renderMonitorLinks() {
+        const monitors = state.config?.monitorTools || [];
+        els.monitorLinks.forEach((link) => {
+          const monitor = monitors.find((item) => item.id === link.dataset.monitorId);
+          if (!monitor) {
+            return;
+          }
+
+          link.href = monitor.url;
+          link.textContent = monitor.label;
+          link.title = `Open ${monitor.label}`;
+        });
       }
 
       function activeUsername() {
@@ -1104,25 +1190,68 @@
         return users.find((user) => user.username === username);
       }
 
-      function activeRoles() {
+      function activePolicySubjects() {
+        if (state.permissions?.policySubjects) {
+          return new Set(state.permissions.policySubjects);
+        }
         if (state.claims) {
           return new Set(state.claims.realm_access?.roles || []);
         }
         return new Set(seededUser(activeUsername())?.roles || []);
       }
 
-      function agentRole(agentId) {
-        return (
-          (state.config?.agents || []).find((agent) => agent.id === agentId)?.role ||
-          `agent:${agentId}:invoke`
+      function agentPolicy(agentId) {
+        return (state.catalog?.agents || []).find((agent) => agent.id === agentId);
+      }
+
+      function permissionPolicy(permissionId) {
+        return (state.catalog?.dataSources || []).find(
+          (source) => source.id === permissionId,
         );
       }
 
-      function permissionRole(permissionId) {
-        return (
-          (state.config?.tools || []).find((tool) => tool.id === permissionId)?.role ||
-          `permission:${permissionId}:read`
-        );
+      function toolPolicy(toolId) {
+        return (state.catalog?.mcpServers || []).find((server) => server.id === toolId);
+      }
+
+      function agentSubjectLabel(agentId) {
+        const policy = agentPolicy(agentId);
+        return policy ? accessSubjectLabel(policy) : `agent:${agentId}`;
+      }
+
+      function permissionSubjectLabel(permissionId) {
+        const policy = permissionPolicy(permissionId);
+        return policy ? accessSubjectLabel(policy) : `datasource:${permissionId}`;
+      }
+
+      function accessSubjects(item) {
+        if (Array.isArray(item.roles) && item.roles.length) {
+          return item.roles;
+        }
+        return item.role ? [item.role] : [];
+      }
+
+      function hasAccessSubject(roles, item) {
+        return accessSubjects(item).some((role) => roles.has(role));
+      }
+
+      function isAllowedByPolicy(item, subjects, allowedKey) {
+        // /catalog decides access server-side; the rest is legacy fallback.
+        if (typeof item.allowed === "boolean") {
+          return item.allowed;
+        }
+        const allowedIds = state.permissions?.[allowedKey];
+        if (Array.isArray(allowedIds)) {
+          return allowedIds.includes(item.id);
+        }
+        return hasAccessSubject(subjects, item);
+      }
+
+      function accessSubjectLabel(item) {
+        // Granting subjects are only served to policy admins, so fall back to
+        // the policy object every caller is allowed to see.
+        const subjects = accessSubjects(item);
+        return subjects.length ? subjects.join(", ") : item.policyObject || item.id;
       }
 
       function expectedResultForSample(sample, username, agentAllowed, permissionAllowed) {
@@ -1132,7 +1261,7 @@
           return {
             allowed: false,
             text: `${subject}: agent access denied`,
-            title: `${subject} lacks ${agentRole(sample.agent)}`,
+            title: `${subject} lacks a policy subject for ${sample.agent}`,
           };
         }
 
@@ -1141,7 +1270,7 @@
           return {
             allowed: false,
             text: `${subject}: ${deniedExpected}`,
-            title: `${subject} lacks ${permissionRole(sample.requiredPermission)}`,
+            title: `${subject} lacks a policy subject for ${sample.requiredPermission}`,
           };
         }
 
@@ -1150,8 +1279,8 @@
           allowed: true,
           text: `${subject}: ${expected}`,
           title: sample.requiredPermission
-            ? `${expected} allowed by ${permissionRole(sample.requiredPermission)}`
-            : `${expected} after ${agentRole(sample.agent)}`,
+            ? `${expected} allowed by ${permissionSubjectLabel(sample.requiredPermission)}`
+            : `${expected} after ${agentSubjectLabel(sample.agent)}`,
         };
       }
 
@@ -1165,7 +1294,7 @@
         name.textContent = item.id;
         const role = document.createElement("span");
         role.className = "access-role";
-        role.textContent = item.role;
+        role.textContent = accessSubjectLabel(item);
         text.append(name, role);
 
         const status = document.createElement("span");
@@ -1180,20 +1309,20 @@
         els.toolAccessList.replaceChildren();
         renderSamples();
 
-        if (!state.claims || !state.config) {
+        if (!state.claims || !state.catalog) {
           els.accessPanel.hidden = true;
           return;
         }
 
-        const roles = new Set(state.claims.realm_access?.roles || []);
-        (state.config.agents || []).forEach((agent) => {
-          const allowed = roles.has(agent.role);
+        const subjects = activePolicySubjects();
+        (state.catalog.agents || []).forEach((agent) => {
+          const allowed = isAllowedByPolicy(agent, subjects, "allowedAgents");
           els.agentAccessList.append(accessItem(agent, allowed));
         });
 
-        (state.config.tools || []).forEach((tool) => {
-          const allowed = roles.has(tool.role);
-          els.toolAccessList.append(accessItem(tool, allowed));
+        (state.catalog.dataSources || []).forEach((source) => {
+          const allowed = isAllowedByPolicy(source, subjects, "allowedDataSources");
+          els.toolAccessList.append(accessItem(source, allowed));
         });
 
         els.accessPanel.hidden = false;
@@ -1220,8 +1349,8 @@
         if (run.status === "approved") {
           return "Human approval was recorded.";
         }
-        if (run.tool === "sql" && Array.isArray(run.result?.rows)) {
-          return `SQL tool completed with ${run.result.rows.length} row(s).`;
+        if (run.tool === "mcp" && Array.isArray(run.result?.output?.rows)) {
+          return `MCP tool '${run.result.tool}' completed with ${run.result.output.rows.length} row(s).`;
         }
         if (run.status === "running" || run.status === "requested") {
           return "Agent accepted the request and is waiting for tool output.";
@@ -1307,37 +1436,42 @@
           run.status === "requires_approval",
         );
 
-        if (run.tool !== "sql") {
+        if (run.tool !== "mcp") {
           if (run.status === "running" || run.status === "requested") {
-            showSqlMessage("Waiting for a SQL tool response...");
+            showSqlMessage("Waiting for a tool response...");
           } else if (run.status === "denied") {
-            showSqlMessage(run.denied_reason || "Request was denied before SQL ran.", "error");
+            showSqlMessage(run.denied_reason || "Request was denied before any tool ran.", "error");
           } else if (run.status === "requires_approval") {
-            showSqlMessage("This request requires approval, so no SQL response was produced.");
+            showSqlMessage("This request requires approval, so no tool response was produced.");
           } else if (run.status === "approved") {
-            showSqlMessage("Human approval recorded. No SQL response was produced.");
+            showSqlMessage("Human approval recorded. No tool response was produced.");
           } else if (run.tool) {
-            showSqlMessage(`Completed tool was ${run.tool}, not sql.`);
+            showSqlMessage(`Completed tool was ${run.tool}, not mcp.`);
           }
           return;
         }
 
         if (run.status === "failed") {
-          showSqlMessage(pretty(run.result || { error: "SQL tool failed" }), "error");
+          showSqlMessage(pretty(run.result || { error: "MCP tool failed" }), "error");
           return;
         }
 
-        const rows = run.result?.rows;
+        const rows = run.result?.output?.rows;
         if (Array.isArray(rows)) {
           if (rows.length === 0) {
-            showSqlMessage("SQL completed successfully and returned 0 rows.", "ok");
+            showSqlMessage("The MCP tool completed successfully and returned 0 rows.", "ok");
           } else {
             renderSqlRows(rows);
           }
           return;
         }
 
-        showSqlMessage("SQL tool is still running...");
+        if (run.result?.output) {
+          showSqlMessage(pretty(run.result.output), "ok");
+          return;
+        }
+
+        showSqlMessage("The MCP tool is still running...");
       }
 
       function isTerminalRunStatus(status) {
@@ -1369,7 +1503,7 @@
               800,
             );
           } else if (!isTerminalRunStatus(run.status)) {
-            showSqlMessage("Still waiting for SQL response. Check worker logs if this takes longer.");
+            showSqlMessage("Still waiting for the tool response. Check mcp-worker logs if this takes longer.");
           }
         } catch (error) {
           showSqlMessage(`Run status polling failed: ${error.message}`, "error");
@@ -1413,6 +1547,8 @@
         stopPolling();
         state.token = "";
         state.claims = null;
+        state.permissions = null;
+        state.catalog = null;
         state.currentInput = "";
         state.currentRunId = "";
         state.initialResponse = null;
@@ -1432,6 +1568,8 @@
       function setLoggedIn(token) {
         state.token = token;
         state.claims = decodeJwt(token);
+        state.permissions = null;
+        state.catalog = null;
         const username = state.claims.preferred_username || els.username.value;
         els.tokenStatus.textContent = "Token ready";
         els.tokenStatus.className = "pill ok";
@@ -1441,6 +1579,37 @@
         els.runBtn.disabled = false;
         renderClaims();
         renderAccess();
+      }
+
+      async function loadActivePermissions() {
+        const response = await fetch("/ui/permissions", {
+          headers: {
+            Authorization: `Bearer ${state.token}`,
+          },
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || `Permission request failed: ${response.status}`);
+        }
+
+        state.permissions = data;
+        await loadCatalog();
+        renderClaims();
+        renderAccess();
+      }
+
+      async function loadCatalog() {
+        const response = await fetch("/catalog", {
+          headers: {
+            Authorization: `Bearer ${state.token}`,
+          },
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail || `Catalog request failed: ${response.status}`);
+        }
+
+        state.catalog = data;
       }
 
       function applyPreset(index) {
@@ -1463,18 +1632,31 @@
 
       function renderSamples() {
         const username = activeUsername();
-        const roles = activeRoles();
+        const subjects = activePolicySubjects();
         els.sampleGrid.replaceChildren();
 
         samples.forEach((sample) => {
-          const agentAllowed = roles.has(agentRole(sample.agent));
+          const agentAccess = agentPolicy(sample.agent);
+          const permissionAccess = sample.requiredPermission
+            ? permissionPolicy(sample.requiredPermission)
+            : null;
+          const toolAccess = toolPolicy(sample.tool);
+          const agentAllowed = agentAccess
+            ? isAllowedByPolicy(agentAccess, subjects, "allowedAgents")
+            : false;
           const permissionAllowed = sample.requiredPermission
-            ? roles.has(permissionRole(sample.requiredPermission))
+            ? permissionAccess
+              ? isAllowedByPolicy(permissionAccess, subjects, "allowedDataSources")
+              : false
             : agentAllowed;
-          const toolAllowed = sample.requiredPermission ? permissionAllowed : agentAllowed;
+          const toolAllowed = toolAccess
+            ? isAllowedByPolicy(toolAccess, subjects, "allowedTools")
+            : sample.requiredPermission
+              ? permissionAllowed
+              : agentAllowed;
           const permissionText = sample.requiredPermission || sample.permissionLabel;
           const permissionTitle = sample.requiredPermission
-            ? `${sample.requiredPermission} requires ${permissionRole(sample.requiredPermission)}`
+            ? `${sample.requiredPermission} requires ${permissionSubjectLabel(sample.requiredPermission)}`
             : "This sample stops at the human approval gate";
           const expectedResult = expectedResultForSample(
             sample,
@@ -1512,14 +1694,14 @@
             {
               text: `Agent: ${sample.agent}`,
               allowed: agentAllowed,
-              title: `${sample.agent} requires ${agentRole(sample.agent)}`,
+              title: `${sample.agent} allowed by ${agentSubjectLabel(sample.agent)}`,
             },
             {
               text: `Tool: ${sample.tool}`,
               allowed: toolAllowed,
               title: sample.requiredPermission
                 ? `${sample.tool} uses ${sample.requiredPermission}`
-                : `${sample.tool} requires ${agentRole(sample.agent)}`,
+                : `${sample.tool} follows ${agentSubjectLabel(sample.agent)}`,
             },
             {
               text: `Permission: ${permissionText}`,
@@ -1579,6 +1761,7 @@
         state.config = await response.json();
         els.configStatus.textContent = state.config.keycloakIssuer;
         els.configStatus.className = "pill ok";
+        renderMonitorLinks();
         renderAccess();
       }
 
@@ -1611,7 +1794,8 @@
           }
 
           setLoggedIn(data.access_token);
-          setMessage("Login succeeded. Token contains tenant and role claims.", "ok");
+          await loadActivePermissions();
+          setMessage("Login succeeded. Gateway permissions are loaded.", "ok");
         } catch (error) {
           setLoggedOut();
           setMessage(`Login failed: ${error.message}`, "error");
@@ -1655,7 +1839,7 @@
           els.responseOutput.textContent = pretty({
             initial_response: state.initialResponse,
             next_log_check:
-              "docker compose logs -f orchestrator sql-worker report-worker db-access",
+              "docker compose logs -f orchestrator mcp-worker world-mcp procurement-mcp report-mcp",
           });
 
           if (!response.ok) {
@@ -1666,7 +1850,7 @@
               state.currentInput,
               data.denied_reason || "Request was denied before tool execution.",
             );
-            showSqlMessage(data.denied_reason || "Request was denied before SQL ran.", "error");
+            showSqlMessage(data.denied_reason || "Request was denied before any tool ran.", "error");
             setMessage("Request reached the orchestrator and was denied by tool permissions.", "error");
           } else if (data.status === "requires_approval") {
             renderAgentIo(
@@ -1674,15 +1858,15 @@
               "Human approval is required before this request can continue.",
               true,
             );
-            showSqlMessage("This request requires approval, so no SQL response was produced.");
+            showSqlMessage("This request requires approval, so no tool response was produced.");
             setMessage("Request reached the orchestrator and requires approval.");
           } else {
             renderAgentIo(
               state.currentInput,
               "Agent accepted the request and is waiting for tool output.",
             );
-            showSqlMessage("Waiting for SQL worker response...");
-            setMessage("Request accepted. Waiting for SQL response from the worker.", "ok");
+            showSqlMessage("Waiting for the MCP worker response...");
+            setMessage("Request accepted. Waiting for the tool response from the MCP worker.", "ok");
             pollRunStatus(state.currentRunId);
           }
         } catch (error) {

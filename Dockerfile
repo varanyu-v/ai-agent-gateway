@@ -12,6 +12,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY apps ./apps
+COPY policy ./policy
 COPY sql ./sql
 
 USER app

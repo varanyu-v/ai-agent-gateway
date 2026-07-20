@@ -13,17 +13,323 @@ x-app-env: &app-env
   KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-agent-frontend}
   KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/ptvn/protocol/openid-connect/certs}
   ORCH_URL: http://orchestrator:8001
-  DB_PROXY_URL: http://db-access:8003
+  AGENT_CALLBACK_TOKEN: ${AGENT_CALLBACK_TOKEN:-}
   KAFKA_BOOTSTRAP: kafka:9092
   LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
   LITELLM_MODEL: ${LITELLM_MODEL:-}
   LITELLM_API_KEY: ${LITELLM_API_KEY:-}
   LITELLM_TIMEOUT_SECONDS: ${LITELLM_TIMEOUT_SECONDS:-30}
-  DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
-  WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
-  PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
+  ASSISTANT_NAME: ${ASSISTANT_NAME:-}
+  ASSISTANT_ROLE: ${ASSISTANT_ROLE:-}
+  ASSISTANT_GENDER: ${ASSISTANT_GENDER:-}
+  ASSISTANT_TONE: ${ASSISTANT_TONE:-}
+  ASSISTANT_STYLE: ${ASSISTANT_STYLE:-}
+  ASSISTANT_PERSONA_PROMPT: ${ASSISTANT_PERSONA_PROMPT:-}
+  ASSISTANT_WELCOME_MESSAGE: ${ASSISTANT_WELCOME_MESSAGE:-}
+  LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+  LANGFUSE_CAPTURE_CONTENT: ${LANGFUSE_CAPTURE_CONTENT:-true}
+  OTEL_ENABLED: ${OTEL_ENABLED:-true}
+  OTEL_SERVICE_NAMESPACE: ${OTEL_SERVICE_NAMESPACE:-ai-agent-gateway}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+  DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+  GRAFANA_URL: ${GRAFANA_URL:-http://localhost:3000}
+  PROMETHEUS_URL: ${PROMETHEUS_URL:-http://localhost:9090}
+  LOKI_UI_URL: ${LOKI_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bservice%3D%5C%22gateway%5C%22%7D%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
+  TEMPO_UI_URL: ${TEMPO_UI_URL:-http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D}
+
+x-langfuse-env: &langfuse-env
+  NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3001}
+  DATABASE_URL: ${LANGFUSE_DATABASE_URL:-postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse}
+  SALT: ${LANGFUSE_SALT:-local-langfuse-salt}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+  TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-false}
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+  CLICKHOUSE_CLUSTER_ENABLED: ${LANGFUSE_CLICKHOUSE_CLUSTER_ENABLED:-false}
+  LANGFUSE_USE_AZURE_BLOB: ${LANGFUSE_USE_AZURE_BLOB:-false}
+  LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE: ${LANGFUSE_USE_OCI_NATIVE_OBJECT_STORAGE:-false}
+  LANGFUSE_OCI_AUTH_TYPE: ${LANGFUSE_OCI_AUTH_TYPE:-workload_identity}
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:-true}
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX:-events/}
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:-langfuse}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION:-auto}
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:-http://localhost:19090}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:-true}
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:-media/}
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: ${LANGFUSE_S3_BATCH_EXPORT_ENABLED:-false}
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: ${LANGFUSE_S3_BATCH_EXPORT_BUCKET:-langfuse}
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: ${LANGFUSE_S3_BATCH_EXPORT_PREFIX:-exports/}
+  LANGFUSE_S3_BATCH_EXPORT_REGION: ${LANGFUSE_S3_BATCH_EXPORT_REGION:-auto}
+  LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://langfuse-minio:9000
+  LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT: ${LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT:-http://localhost:19090}
+  LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+  LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: ${LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE:-true}
+  LANGFUSE_INGESTION_QUEUE_DELAY_MS: ${LANGFUSE_INGESTION_QUEUE_DELAY_MS:-}
+  LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS: ${LANGFUSE_INGESTION_CLICKHOUSE_WRITE_INTERVAL_MS:-}
+  REDIS_HOST: langfuse-redis
+  REDIS_PORT: 6379
+  REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-myredissecret}
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: ${LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK:-false}
+  REDIS_TLS_ENABLED: ${LANGFUSE_REDIS_TLS_ENABLED:-false}
+  REDIS_TLS_CA: ${LANGFUSE_REDIS_TLS_CA:-/certs/ca.crt}
+  REDIS_TLS_CERT: ${LANGFUSE_REDIS_TLS_CERT:-/certs/redis.crt}
+  REDIS_TLS_KEY: ${LANGFUSE_REDIS_TLS_KEY:-/certs/redis.key}
+  EMAIL_FROM_ADDRESS: ${LANGFUSE_EMAIL_FROM_ADDRESS:-}
+  SMTP_CONNECTION_URL: ${LANGFUSE_SMTP_CONNECTION_URL:-}
 
 services:
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on: &langfuse-depends-on
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment:
+      <<: *langfuse-env
+
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3
+    restart: unless-stopped
+    networks:
+      - backend
+    depends_on: *langfuse-depends-on
+    ports:
+      - "3001:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-local-langfuse-nextauth-secret}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-local-org}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Local AI Agent Gateway}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-local-ai-agent-gateway}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-AI Agent Gateway}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@example.com}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-admin-password}
+
+  langfuse-clickhouse:
+    image: docker.io/clickhouse/clickhouse-server
+    restart: unless-stopped
+    user: "101:101"
+    networks:
+      - backend
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:18123:8123"
+      - "127.0.0.1:19000:9000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  langfuse-minio:
+    image: cgr.dev/chainguard/minio
+    restart: unless-stopped
+    entrypoint: sh
+    command:
+      - -c
+      - mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data
+    networks:
+      - backend
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-miniosecret}
+    volumes:
+      - langfuse-minio-data:/data
+    ports:
+      - "19090:9000"
+      - "127.0.0.1:19091:9001"
+    healthcheck:
+      test:
+        - CMD
+        - mc
+        - ready
+        - local
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  langfuse-redis:
+    image: docker.io/redis:7
+    restart: unless-stopped
+    environment:
+      REDIS_AUTH: ${LANGFUSE_REDIS_AUTH:-myredissecret}
+    command:
+      - redis-server
+      - --requirepass
+      - ${LANGFUSE_REDIS_AUTH:-myredissecret}
+      - --maxmemory-policy
+      - noeviction
+    networks:
+      - backend
+    volumes:
+      - langfuse-redis-data:/data
+    ports:
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_AUTH" ping | grep PONG
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  langfuse-postgres:
+    image: docker.io/postgres:17
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-langfuse}
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U langfuse -d langfuse
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+    ports:
+      - "3200:3200"
+
+  loki:
+    image: grafana/loki:3.2.0
+    command:
+      - -config.file=/etc/loki/loki.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    command:
+      - -config.file=/etc/promtail/promtail.yaml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      loki:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    command:
+      - --config=/etc/otelcol-contrib/config.yml
+    restart: unless-stopped
+    networks:
+      - backend
+    volumes:
+      - ./docker/otel/collector-config.yaml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "9464:9464"
+    depends_on:
+      tempo:
+        condition: service_started
+
   keycloak:
     image: quay.io/keycloak/keycloak:26.2
     command:
@@ -48,6 +354,15 @@ services:
     command: uvicorn apps.gateway.main:app --host 0.0.0.0 --port 8000
     environment:
       <<: *app-env
+      GATEWAY_RATE_LIMIT_ENABLED: ${GATEWAY_RATE_LIMIT_ENABLED:-true}
+      GATEWAY_RUN_RATE_PER_MINUTE: ${GATEWAY_RUN_RATE_PER_MINUTE:-30}
+      GATEWAY_RUN_RATE_BURST: ${GATEWAY_RUN_RATE_BURST:-10}
+      GATEWAY_MAX_MESSAGE_CHARS: ${GATEWAY_MAX_MESSAGE_CHARS:-4000}
+      GATEWAY_IDEMPOTENCY_TTL_SECONDS: ${GATEWAY_IDEMPOTENCY_TTL_SECONDS:-600}
+      GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS: ${GATEWAY_UPSTREAM_CONNECT_TIMEOUT_SECONDS:-5}
+      GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS: ${GATEWAY_UPSTREAM_READ_TIMEOUT_SECONDS:-60}
+      GATEWAY_BREAKER_FAILURE_THRESHOLD: ${GATEWAY_BREAKER_FAILURE_THRESHOLD:-5}
+      GATEWAY_BREAKER_RESET_SECONDS: ${GATEWAY_BREAKER_RESET_SECONDS:-30}
     ports:
       - "8000:8000"
     depends_on:
@@ -55,10 +370,12 @@ services:
         condition: service_started
       orchestrator:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5
@@ -69,60 +386,207 @@ services:
     command: uvicorn apps.orchestrator.main:app --host 0.0.0.0 --port 8001
     environment:
       <<: *app-env
+      AGENT_SERVICES: ${AGENT_SERVICES:-world-agent=http://world-agent:8004,procurement-agent=http://procurement-agent:8005}
+      AGENT_CONNECT_TIMEOUT_SECONDS: ${AGENT_CONNECT_TIMEOUT_SECONDS:-5}
+      AGENT_READ_TIMEOUT_SECONDS: ${AGENT_READ_TIMEOUT_SECONDS:-60}
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011,report-mcp=http://report-mcp:8012}
+      MCP_CONNECT_TIMEOUT_SECONDS: ${MCP_CONNECT_TIMEOUT_SECONDS:-5}
+      MCP_READ_TIMEOUT_SECONDS: ${MCP_READ_TIMEOUT_SECONDS:-30}
+      ROUTER_AGENT_ID: ${ROUTER_AGENT_ID:-assistant}
     ports:
       - "8001:8001"
     depends_on:
       kafka:
         condition: service_healthy
+      world-agent:
+        condition: service_healthy
+      procurement-agent:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/internal/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
-  db-access:
+  world-agent:
     <<: *app
-    command: uvicorn apps.db_access.main:app --host 0.0.0.0 --port 8003
+    command: uvicorn apps.agents.world.main:app --host 0.0.0.0 --port 8004
     environment:
       <<: *app-env
     ports:
-      - "8003:8003"
+      - "8004:8004"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procurement-agent:
+    <<: *app
+    command: uvicorn apps.agents.procurement.main:app --host 0.0.0.0 --port 8005
+    environment:
+      <<: *app-env
+    ports:
+      - "8005:8005"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Per-agent data planes. Each holds credentials for ONLY its own database,
+  # so a fault in one cannot reach the other's data.
+  world-db-access:
+    <<: *app
+    command: uvicorn apps.data_access.world.main:app --host 0.0.0.0 --port 8006
+    environment:
+      <<: *app-env
+      # Container-internal host. Hard-coded (not from .env) because .env values
+      # target host-based dev (localhost); inside Compose the DB is `postgres`.
+      WORLD_DATABASE_URL: postgresql://world:world123@postgres:5432/world-db
+    ports:
+      - "8006:8006"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8006/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  procurement-db-access:
+    <<: *app
+    command: uvicorn apps.data_access.procurement.main:app --host 0.0.0.0 --port 8007
+    environment:
+      <<: *app-env
+      # Container-internal host. Hard-coded (not from .env) because .env values
+      # target host-based dev (localhost); inside Compose the DB is `postgres`.
+      PROCUREMENT_DATABASE_URL: postgresql://world:world123@postgres:5432/procurement_db
+    ports:
+      - "8007:8007"
     depends_on:
       postgres:
         condition: service_healthy
       procurement-db-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
     healthcheck:
       test:
         - CMD-SHELL
-        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8003/docs', timeout=5)"
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8007/health', timeout=5)"
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
-  sql-worker:
+  # MCP tool services. Credential-free like the agents: every read goes
+  # through the data plane that owns the database.
+  world-mcp:
     <<: *app
-    command: python -m apps.workers.sql_worker
+    command: uvicorn apps.mcp.world.main:app --host 0.0.0.0 --port 8010
     environment:
       <<: *app-env
+      WORLD_DATA_PLANE_URL: http://world-db-access:8006
+    ports:
+      - "8010:8010"
     depends_on:
-      kafka:
+      world-db-access:
         condition: service_healthy
-      db-access:
-        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  report-worker:
+  procurement-mcp:
     <<: *app
-    command: python -m apps.workers.report_worker
+    command: uvicorn apps.mcp.procurement.main:app --host 0.0.0.0 --port 8011
     environment:
       <<: *app-env
+      PROCUREMENT_DATA_PLANE_URL: http://procurement-db-access:8007
+    ports:
+      - "8011:8011"
+    depends_on:
+      procurement-db-access:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Report generation as an MCP job-submission tool. Reads no databases, so it
+  # needs no data-plane dependency.
+  report-mcp:
+    <<: *app
+    command: uvicorn apps.mcp.report.main:app --host 0.0.0.0 --port 8012
+    environment:
+      <<: *app-env
+    ports:
+      - "8012:8012"
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8012/health', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  mcp-worker:
+    <<: *app
+    command: python -m apps.workers.mcp_worker
+    environment:
+      <<: *app-env
+      MCP_SERVICES: ${MCP_SERVICES:-world-mcp=http://world-mcp:8010,procurement-mcp=http://procurement-mcp:8011,report-mcp=http://report-mcp:8012}
     depends_on:
       kafka:
         condition: service_healthy
+      world-mcp:
+        condition: service_healthy
+      procurement-mcp:
+        condition: service_healthy
+      report-mcp:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   kafka:
     image: confluentinc/cp-kafka:7.7.1
@@ -193,7 +657,14 @@ services:
         condition: service_healthy
 
 volumes:
+  langfuse-postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:
+  langfuse-redis-data:
   postgres-world-pg18-data:
+  prometheus-data:
+  loki-data:
 
 networks:
   backend:
